@@ -588,7 +588,8 @@ function getInventoryFilters() {
         show_benefit_item: document.getElementById('filter-benefit-item')?.checked !== false,
         show_benefit_badge: document.getElementById('filter-benefit-badge')?.checked !== false,
         show_benefit_emote: document.getElementById('filter-benefit-emote')?.checked !== false,
-        show_benefit_other: document.getElementById('filter-benefit-other')?.checked !== false
+        show_benefit_other: document.getElementById('filter-benefit-other')?.checked !== false,
+        ...window.InventoryFilterExtension?.getAdditionalSettings()
     };
 }
 
@@ -597,11 +598,14 @@ function campaignMatchesFilters(campaign, filters) {
     // Calculate "finished" status: all drops claimed
     const isFinished = campaign.total_drops > 0 && campaign.claimed_drops === campaign.total_drops;
 
+    if (!window.InventoryFilterExtension?.matches(campaign, filters, isFinished)) {
+        return false;
+    }
+
     // Check if any filter is enabled
     const hasGameFilter = filters.game_name_search && filters.game_name_search.length > 0;
-    const anyFilterEnabled = filters.show_active || filters.show_not_linked ||
-        filters.show_upcoming || filters.show_expired ||
-        filters.show_finished || hasGameFilter;
+    const anyFilterEnabled = filters.show_active || filters.show_upcoming ||
+        filters.show_expired || hasGameFilter;
 
     // If no filters enabled, show all campaigns
     if (!anyFilterEnabled) {
@@ -612,15 +616,11 @@ function campaignMatchesFilters(campaign, filters) {
     let statusMatch = false;
 
     if (filters.show_active && campaign.active) statusMatch = true;
-    if (filters.show_not_linked && !campaign.linked) statusMatch = true;
     if (filters.show_upcoming && campaign.upcoming) statusMatch = true;
     if (filters.show_expired && campaign.expired) statusMatch = true;
-    if (filters.show_finished && isFinished) statusMatch = true;
 
     // If status filters are enabled but campaign doesn't match any, filter it out
-    const hasStatusFilters = filters.show_active || filters.show_not_linked ||
-        filters.show_upcoming || filters.show_expired ||
-        filters.show_finished;
+    const hasStatusFilters = filters.show_active || filters.show_upcoming || filters.show_expired;
     if (hasStatusFilters && !statusMatch) {
         return false;
     }
@@ -677,6 +677,7 @@ function clearInventoryFilters() {
     document.getElementById('filter-upcoming').checked = false;
     document.getElementById('filter-expired').checked = false;
     document.getElementById('filter-finished').checked = false;
+    window.InventoryFilterExtension?.reset();
     document.getElementById('inventory-game-search').value = '';
 
     // Reset benefit type filters to checked (show all)
@@ -1088,6 +1089,7 @@ function updateSettingsUI(settings) {
         document.getElementById('filter-upcoming').checked = settings.inventory_filters.show_upcoming || false;
         document.getElementById('filter-expired').checked = settings.inventory_filters.show_expired || false;
         document.getElementById('filter-finished').checked = settings.inventory_filters.show_finished || false;
+        window.InventoryFilterExtension?.restore(settings.inventory_filters);
 
         // Restore selected games array
         selectedInventoryGames = Array.isArray(settings.inventory_filters.game_name_search)
@@ -1850,6 +1852,7 @@ function applyTranslations(t) {
 
     if (inventoryTab && t.gui?.inventory?.filters) {
         const f = t.gui.inventory.filters;
+        window.InventoryFilterExtension?.translate(t);
         const updateLabel = (id, text) => {
             const el = document.getElementById(id)?.parentElement.querySelector('span');
             if (el) el.textContent = text;

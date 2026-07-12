@@ -70,12 +70,28 @@ jobs:
             exit 1
           fi
 
+  frontend:
+    name: Frontend Filter Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test inventory filter extension
+        run: node --test tests/inventory_filter_extension.test.js
+
   docker:
     name: Docker Build Validation
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [lint, validate]
+    needs: [lint, validate, frontend]
 
     steps:
       - name: Checkout code
