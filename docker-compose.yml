@@ -1,15 +1,22 @@
 services:
   twitch-drops-miner:
-    build: .
     container_name: twitch-drops-miner
-    image: twitch-drops-miner:latest
+    image: ghcr.io/eb-plum/twitch-drops-miner:latest
     ports:
-      - "8080:8080"
+      - "0.0.0.0:8080:8080"
     volumes:
       # Mount data directory for persistent storage
       - ./data:/app/data
       - ./logs:/app/logs
     environment:
       # Set timezone (optional, defaults to UTC)
-      - TZ=Australia/Sydney
+      - TZ=Asia/Seoul
+    restart: unless-stopped
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: twitch-drops-miner-watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: twitch-drops-miner --interval 3600 --cleanup
     restart: unless-stopped
