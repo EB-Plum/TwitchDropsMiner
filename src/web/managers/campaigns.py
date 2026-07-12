@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
@@ -22,6 +22,7 @@ class CampaignProgressManager:
         self._broadcaster = broadcaster
         self._current_drop: TimedDrop | None = None
         self._remaining_seconds: int = 0
+        self._health_warning: dict[str, Any] | None = None
 
     def update(self, drop: TimedDrop | None, remaining_seconds: int):
         """Update the current drop progress and remaining time.
@@ -54,6 +55,23 @@ class CampaignProgressManager:
         """Stop the progress timer and clear the current drop."""
         self._current_drop = None
         asyncio.create_task(self._broadcaster.emit("drop_progress_stop", {}))
+        self.clear_health_warning()
+
+    def set_health_warning(self, warning: dict[str, Any]) -> None:
+        """Store and broadcast a compact progress health warning."""
+        self._health_warning = warning
+        asyncio.create_task(self._broadcaster.emit("progress_health", warning))
+
+    def clear_health_warning(self) -> None:
+        """Clear the active progress health warning, if any."""
+        if self._health_warning is None:
+            return
+        self._health_warning = None
+        asyncio.create_task(self._broadcaster.emit("progress_health", None))
+
+    def get_health_warning(self) -> dict[str, Any] | None:
+        """Return the warning shown to newly connected web clients."""
+        return self._health_warning
 
     def minute_almost_done(self) -> bool:
         """Check if the current progress minute is almost complete.

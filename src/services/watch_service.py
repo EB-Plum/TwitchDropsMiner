@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, NoReturn
 from src.config import CALL, GQL_OPERATIONS, WATCH_INTERVAL
 from src.exceptions import GQLException
 from src.i18n import _
+from src.services.progress_health import ProgressHealthService
 from src.utils import task_wrapper
 
 
@@ -49,6 +50,7 @@ class WatchService:
             twitch: The Twitch client instance
         """
         self._twitch = twitch
+        self._progress_health = ProgressHealthService(twitch)
 
     def can_watch(self, channel: Channel) -> bool:
         """
@@ -139,6 +141,7 @@ class WatchService:
 
         Clears the watching channel and updates GUI elements.
         """
+        self._progress_health.reset("watching_stopped")
         self._twitch.gui.clear_drop()
         self._twitch.watching_channel.clear()
         self._twitch.gui.channels.clear_watching()
@@ -149,6 +152,7 @@ class WatchService:
 
         Stops the progress timer and signals the watch loop to restart.
         """
+        self._progress_health.reset("watching_restarted")
         self._twitch.gui.progress.stop_timer()
         self._twitch._watching_restart.set()
 
@@ -202,6 +206,7 @@ class WatchService:
             # wait ~20 seconds for a progress update
             await asyncio.sleep(20)
 
+            gql_status = "not_checked"
             if self._twitch.gui.progress.minute_almost_done():
                 # If the previous update was more than ~60s ago, and the progress tracker
                 # isn't counting down anymore, that means Twitch has temporarily
@@ -220,11 +225,20 @@ class WatchService:
                     ]
                 except GQLException:
                     drop_data = None
+                    gql_status = "error"
+                else:
+                    gql_status = "no_session" if drop_data is None else "unknown_drop"
 
                 if drop_data is not None:
                     gql_drop: TimedDrop | None = self._twitch._drops.get(drop_data["dropID"])
                     if gql_drop is not None and gql_drop.can_earn(channel):
+                        previous_minutes = gql_drop.real_current_minutes
                         gql_drop.update_minutes(drop_data["currentMinutesWatched"])
+                        gql_status = (
+                            "advanced"
+                            if gql_drop.real_current_minutes > previous_minutes
+                            else "unchanged"
+                        )
                         drop_text: str = (
                             f"{gql_drop.name} ({gql_drop.campaign.game}, "
                             f"{gql_drop.current_minutes}/{gql_drop.required_minutes})"
@@ -251,4 +265,9 @@ class WatchService:
                     else:
                         logger.log(CALL, "No active drop could be determined")
 
+            self._progress_health.observe(
+                channel,
+                watch_succeeded=succeeded,
+                gql_status=gql_status,
+            )
             await self.watch_sleep(interval - min(time() - last_sent, interval))
