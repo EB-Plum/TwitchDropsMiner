@@ -363,6 +363,7 @@ async def connect(sid, environ):
                 "login": gui_manager.login.get_status(),
                 "manual_mode": twitch_client.get_manual_mode_info(),
                 "current_drop": gui_manager.progress.get_current_drop(),
+                "progress_health": gui_manager.progress.get_health_warning(),
                 "wanted_items": gui_manager.get_wanted_game_tree(),
             },
             room=sid,

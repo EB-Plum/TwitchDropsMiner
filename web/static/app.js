@@ -12,6 +12,15 @@ const state = {
     translations: {}  // Store current translations
 };
 
+const progressHealthUI = import('/static/progress-health.mjs').catch(error => {
+    console.warn('Could not load progress health UI:', error);
+    return null;
+});
+
+function updateProgressHealthWarning(warning) {
+    progressHealthUI.then(module => module?.updateProgressHealth(warning));
+}
+
 // ==================== Version Checking ====================
 
 async function fetchAndDisplayVersion() {
@@ -149,6 +158,7 @@ socket.on('initial_state', (data) => {
     } else {
         clearDropProgress();
     }
+    updateProgressHealthWarning(data.progress_health || null);
 
     if (data.wanted_items) {
         renderWantedItems(data.wanted_items);
@@ -202,6 +212,10 @@ socket.on('drop_progress', (data) => {
 
 socket.on('drop_progress_stop', () => {
     clearDropProgress();
+});
+
+socket.on('progress_health', (data) => {
+    updateProgressHealthWarning(data);
 });
 
 socket.on('campaign_add', (data) => {
