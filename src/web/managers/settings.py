@@ -8,13 +8,17 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from src.config.settings import default_settings
+from src.config.settings import InventoryFilterSettings
 from src.i18n.translator import _
 from src.models.game import Game
-from src.utils import merge_json
+from src.utils import DropIgnorePolicy
 
 
 logger = logging.getLogger("TwitchDrops")
+
+# Value returned to web clients in place of the stored Telegram bot token.
+# Never echo the real credential through the unauthenticated web API/socket.
+TELEGRAM_TOKEN_MASK = "••••••••"
 
 
 if TYPE_CHECKING:
@@ -43,13 +47,31 @@ class SettingsManager:
         self._on_change = on_change
         self._available_games: list[str] = []
 
-    def get_settings(self) -> dict[str, Any]:
+    def get_settings(self, legacy_show_not_linked: bool | None = None) -> dict[str, Any]:
         """Get current settings for display.
+
+        Args:
+            legacy_show_not_linked: Request-scoped value echoed only in the
+                immediate settings POST response for a legacy frontend. It is
+                never persisted, mapped to ``link_status``, or returned
+                by a later GET/page reload.
 
         Returns:
             Dictionary containing all user-configurable settings
         """
         settings = vars(self._settings).copy()
+        settings["games_available"] = self._available_games
+        # Never expose the real Telegram bot token to web clients. The token
+        # stays server-side; clients only see a configured flag and a mask.
+        configured_token = bool(settings.get("telegram_bot_token"))
+        settings["telegram_configured"] = configured_token
+        settings["telegram_bot_token"] = TELEGRAM_TOKEN_MASK if configured_token else ""
+        # TODO(remove in 1.3.x): Retain this POST-only echo long enough for stale
+        # pre-versioned frontends to age out; it never survives a page reload.
+        if legacy_show_not_linked is not None:
+            inventory_filters = copy.deepcopy(dict(self._settings.inventory_filters))
+            inventory_filters["show_not_linked"] = legacy_show_not_linked
+            settings["inventory_filters"] = inventory_filters
         return settings
 
     def get_languages(self) -> dict[str, Any]:
@@ -67,15 +89,29 @@ class SettingsManager:
         """Log setting change to both console and system logger."""
         self._console.print(message)
 
-    def update_settings(self, settings_data: dict[str, Any]):
+    def update_settings(self, settings_data: dict[str, Any]) -> dict[str, Any]:
         """Update settings from user input.
 
         Args:
             settings_data: Dictionary of settings to update
         """
         should_trigger_update = False
+        previous_allow_unlinked = getattr(self._settings, "allow_unlinked_campaigns", False)
+        requested_allow_unlinked = settings_data.get("allow_unlinked_campaigns")
+        override_changed = (
+            isinstance(requested_allow_unlinked, bool)
+            and requested_allow_unlinked != previous_allow_unlinked
+        )
         should_trigger_update |= self.check_and_update_setting(
             "games_to_watch", settings_data.get("games_to_watch"), True
+        )
+        drop_name_blacklist = settings_data.get("drop_name_blacklist")
+        if drop_name_blacklist is not None:
+            drop_name_blacklist = DropIgnorePolicy.normalize_keywords(
+                drop_name_blacklist
+            )
+        should_trigger_update |= self.check_and_update_setting(
+            "drop_name_blacklist", drop_name_blacklist, True
         )
         should_trigger_update |= self.check_and_update_setting(
             "dark_mode", settings_data.get("dark_mode")
@@ -98,8 +134,22 @@ class SettingsManager:
             "minimum_refresh_interval_minutes",
             settings_data.get("minimum_refresh_interval_minutes"),
         )
+        if "telegram_bot_token" in settings_data:
+            new_token = str(settings_data.get("telegram_bot_token") or "").strip()
+            if new_token and new_token != TELEGRAM_TOKEN_MASK:
+                self.check_and_update_setting(
+                    "telegram_bot_token", new_token
+                )
+        if "telegram_chat_id" in settings_data:
+            self.check_and_update_setting(
+                "telegram_chat_id", settings_data.get("telegram_chat_id") or ""
+            )
         inventory_filters = settings_data.get("inventory_filters")
+        legacy_show_not_linked = None
         if inventory_filters is not None:
+            legacy_value = inventory_filters.get("show_not_linked")
+            if isinstance(legacy_value, bool):
+                legacy_show_not_linked = legacy_value
             inventory_filters = self._normalize_inventory_filters(inventory_filters)
         should_trigger_update |= self.check_and_update_setting("inventory_filters", inventory_filters)
         should_trigger_update |= self.check_and_update_setting(
@@ -109,22 +159,30 @@ class SettingsManager:
             "mining_benefits", settings_data.get("mining_benefits"), True
         )
 
-        self._settings.save()
-        asyncio.create_task(self._broadcaster.emit("settings_updated", self.get_settings()))
+        if override_changed and isinstance(requested_allow_unlinked, bool):
+            self._settings.allow_unlinked_campaigns = requested_allow_unlinked
+        try:
+            self._settings.save()
+        except Exception:
+            # A rejected save must not silently enable or disable live mining.
+            self._settings.allow_unlinked_campaigns = previous_allow_unlinked
+            raise
+        if override_changed:
+            self._log_change(
+                f"Setting changed: allow_unlinked_campaigns = {requested_allow_unlinked}"
+            )
+            should_trigger_update = True
+        response_settings = self.get_settings(legacy_show_not_linked)
+        asyncio.create_task(self._broadcaster.emit("settings_updated", response_settings))
 
         if should_trigger_update and self._on_change:
             self._on_change()
 
+        return response_settings
+
     def _normalize_inventory_filters(self, updates: dict[str, Any]) -> dict[str, Any]:
         """Merge partial filter updates and discard legacy or unknown keys."""
-        current: dict[str, Any] = copy.deepcopy(dict(self._settings.inventory_filters))
-        current.pop("show_not_linked", None)
-        current.update(updates)
-        current.pop("show_not_linked", None)
-        template = default_settings["inventory_filters"]
-        assert isinstance(template, dict)
-        merge_json(current, template)
-        return current
+        return dict(InventoryFilterSettings.normalize(updates, self._settings.inventory_filters))
 
     def check_and_update_setting(
         self,
@@ -136,7 +194,8 @@ class SettingsManager:
         if new_value is None or getattr(self._settings, key, None) == new_value:
             return False
         setattr(self._settings, key, new_value)
-        self._log_change(f"Setting changed: {key} = {new_value}")
+        log_value = TELEGRAM_TOKEN_MASK if key == "telegram_bot_token" else new_value
+        self._log_change(f"Setting changed: {key} = {log_value}")
         action(new_value)
         return should_trigger_update
 
