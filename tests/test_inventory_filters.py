@@ -1,9 +1,9 @@
 import asyncio
 import json
 import re
-import shutil
 import subprocess
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -13,42 +13,24 @@ import pytest
 from src.config.settings import default_settings
 from src.utils import merge_json
 from src.web.managers.inventory import InventoryManager
+from tests.javascript_helpers import APP_JS, NODE, extract_javascript_function
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-APP_JS = PROJECT_ROOT / "web" / "static" / "app.js"
 INDEX_HTML = PROJECT_ROOT / "web" / "index.html"
-NODE = shutil.which("node")
-
-
-def _extract_javascript_function(source: str, name: str) -> str:
-    signature = f"function {name}("
-    start = source.index(signature)
-    brace_start = source.index("{", start)
-    depth = 0
-
-    for index in range(brace_start, len(source)):
-        if source[index] == "{":
-            depth += 1
-        elif source[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return source[start : index + 1]
-
-    raise AssertionError(f"Could not find the end of {name}()")
 
 
 def test_inventory_filter_defaults_hide_finished_without_restricting_link_state():
     filters = default_settings["inventory_filters"]
 
     assert filters["show_finished"] is False
-    assert filters["show_only_not_linked"] is False
+    assert filters["link_status"] == "all"
     assert "show_not_linked" not in filters
 
     html = INDEX_HTML.read_text(encoding="utf-8")
-    input_tag = re.search(r'<input\b[^>]*\bid="filter-not-linked"[^>]*>', html)
-    assert input_tag is not None
-    assert re.search(r"\bchecked\b", input_tag.group(0)) is None
+    select_tag = re.search(r'<select\b[^>]*\bid="filter-link-status"[^>]*>', html)
+    assert select_tag is not None
+    assert '<option value="all">All</option>' in html
 
 
 def test_legacy_not_linked_setting_migrates_to_neutral_restriction():
@@ -59,7 +41,7 @@ def test_legacy_not_linked_setting_migrates_to_neutral_restriction():
     merge_json(legacy_filters, default_settings["inventory_filters"])
 
     assert "show_not_linked" not in legacy_filters
-    assert legacy_filters["show_only_not_linked"] is False
+    assert legacy_filters["link_status"] == "all"
 
 
 class TestInventoryDropUpdates(unittest.IsolatedAsyncioTestCase):
@@ -67,30 +49,46 @@ class TestInventoryDropUpdates(unittest.IsolatedAsyncioTestCase):
         broadcaster = MagicMock()
         broadcaster.emit = AsyncMock()
         manager = InventoryManager(broadcaster, MagicMock())
-        manager._campaigns["campaign-1"] = {
-            "claimed_drops": 0,
-            "total_drops": 1,
-            "drops": [
-                {
-                    "id": "drop-1",
-                    "current_minutes": 29,
-                    "required_minutes": 30,
-                    "progress": 0.97,
-                    "is_claimed": False,
-                    "can_claim": False,
-                }
-            ],
-        }
-        campaign = SimpleNamespace(id="campaign-1", claimed_drops=1, total_drops=1)
+        starts_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ends_at = starts_at + timedelta(days=1)
+        campaign = SimpleNamespace(
+            id="campaign-1",
+            name="Campaign 1",
+            game=SimpleNamespace(name="Game 1", box_art_url="https://example.test/game.jpg"),
+            campaign_url="https://example.test/campaign",
+            link_url="https://example.test/link",
+            starts_at=starts_at,
+            ends_at=ends_at,
+            linked=True,
+            active=True,
+            upcoming=False,
+            expired=False,
+        )
         drop = SimpleNamespace(
             id="drop-1",
+            name="Drop 1",
             campaign=campaign,
-            current_minutes=30,
+            current_minutes=29,
             required_minutes=30,
-            progress=1.0,
-            is_claimed=True,
+            progress=0.97,
+            is_claimed=False,
             can_claim=False,
+            ignore_reason=None,
+            is_mineable=True,
+            is_watch_drop=True,
+            benefits=[],
+            starts_at=starts_at,
+            ends_at=ends_at,
         )
+        campaign.drops = [drop]
+
+        await manager.add_campaign(campaign)
+        broadcaster.emit.reset_mock()
+
+        drop.current_minutes = 30
+        drop.progress = 1.0
+        drop.is_claimed = True
+        drop.is_mineable = False
 
         manager.update_drop(drop)
         await asyncio.sleep(0)
@@ -102,20 +100,28 @@ class TestInventoryDropUpdates(unittest.IsolatedAsyncioTestCase):
             "drop_update",
             {
                 "campaign_id": "campaign-1",
-                "campaign": {"claimed_drops": 1, "total_drops": 1},
+                "campaign": {
+                    "claimed_drops": 1,
+                    "total_drops": 1,
+                    "ignored_drops": 0,
+                    "skipped_drops": 0,
+                    "finished": True,
+                    "mining_finished": True,
+                },
                 "drop": campaign_data["drops"][0],
+                "drops": campaign_data["drops"],
             },
         )
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
 def test_campaign_filter_behavior_matrix():
-    function_source = _extract_javascript_function(
+    function_source = extract_javascript_function(
         APP_JS.read_text(encoding="utf-8"), "campaignMatchesFilters"
     )
     base_filters = {
         "show_active": False,
-        "show_only_not_linked": False,
+        "link_status": "all",
         "show_upcoming": False,
         "show_expired": False,
         "show_finished": False,
@@ -164,17 +170,17 @@ def test_campaign_filter_behavior_matrix():
         case(
             expected=False,
             campaign_changes={"active": True},
-            filter_changes={"show_active": True, "show_only_not_linked": True},
+            filter_changes={"show_active": True, "link_status": "not_linked"},
         ),
         case(
             expected=True,
             campaign_changes={"active": True, "linked": False},
-            filter_changes={"show_active": True, "show_only_not_linked": True},
+            filter_changes={"show_active": True, "link_status": "not_linked"},
         ),
         case(
             expected=False,
             campaign_changes={"expired": True, "linked": False},
-            filter_changes={"show_active": True, "show_only_not_linked": True},
+            filter_changes={"show_active": True, "link_status": "not_linked"},
         ),
         case(
             expected=True,
@@ -185,6 +191,16 @@ def test_campaign_filter_behavior_matrix():
         case(
             expected=False,
             filter_changes={"show_benefit_item": False, "show_benefit_badge": True},
+        ),
+        case(expected=False, campaign_changes={"mining_finished": True}),
+        case(
+            expected=True,
+            campaign_changes={"mining_finished": True},
+            filter_changes={"show_finished": True},
+        ),
+        case(
+            expected=True,
+            campaign_changes={"claimed_drops": 2, "mining_finished": False},
         ),
     ]
 
@@ -209,3 +225,24 @@ process.stdout.write(JSON.stringify(results));
         {"actual": test_case["expected"], "expected": test_case["expected"]}
         for test_case in cases
     ]
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
+def test_drop_name_blacklist_textarea_parser_trims_lines_and_ignores_blanks():
+    function_source = extract_javascript_function(
+        APP_JS.read_text(encoding="utf-8"), "parseDropNameBlacklist"
+    )
+    script = f"""
+{function_source}
+const parsed = parseDropNameBlacklist('  Gold Mask  \\r\\n\\r\\nBadge\\n gold mask \\n\\t');
+process.stdout.write(JSON.stringify(parsed));
+    """
+    completed = subprocess.run(
+        [NODE, "-"],
+        check=True,
+        capture_output=True,
+        input=script,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == ["Gold Mask", "Badge", "gold mask"]
