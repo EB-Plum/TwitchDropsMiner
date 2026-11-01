@@ -1,0 +1,226 @@
+name: Fork CI and GHCR
+
+on:
+  push:
+    branches:
+      - fork/production
+  pull_request:
+    branches:
+      - fork/production
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  native-helper:
+    name: Native helper builds and smoke tests
+    uses: ./.github/workflows/login-helper.yml
+    with:
+      source-ref: ${{ github.sha }}
+
+  lint:
+    name: Code Quality (Ruff & Mypy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{env.PYTHON_VERSION}}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install ruff mypy
+
+      - name: Run Ruff linter
+        run: |
+          ruff check src/
+          echo "✅ Ruff checks passed!"
+
+      - name: Run Mypy type checker
+        run: |
+          mypy src/
+          echo "✅ Mypy checks passed!"
+
+  test:
+    name: Python Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{env.PYTHON_VERSION}}
+          cache: pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[dev]"
+
+      - name: Check uv lockfile
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Validate uv lockfile
+        run: uv lock --check
+
+      - name: Run Python tests
+        run: python -m pytest tests/
+
+      - name: Run release script tests
+        run: |
+          bash .github/scripts/test/test_validate_semver.sh
+          bash .github/scripts/test/test_github_output.sh
+          bash .github/scripts/test/test_extract_version.sh
+
+  validate:
+    name: Validate Language Files
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{env.PYTHON_VERSION}}
+
+      - name: Validate language files
+        run: |
+          failed=()
+          for file in "lang/"*.json; do
+            if err="$(python -m json.tool "${file}" 2>&1 >/dev/null)"; then
+              echo "[OK] ${file}"
+            else
+              echo "[ERROR] ${file} ${err}"
+              failed+=("${file}")
+            fi
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo -e "\nFailed to validate the following language file(s): ${failed[@]}"
+            exit 1
+          fi
+
+  docker:
+    name: Docker Build Validation
+    runs-on: ubuntu-latest
+    needs: [lint, test, validate]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build Docker image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: Publish verified fork image
+    needs: [native-helper, lint, test, validate, docker]
+    if: >-
+      github.repository == 'EB-Plum/TwitchDropsMiner' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/fork/production'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish tested source
+        id: image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/eb-plum/twitch-drops-miner:sha-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/EB-Plum/TwitchDropsMiner
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Promote only the current production head
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          current_sha="$(git ls-remote --exit-code https://github.com/EB-Plum/TwitchDropsMiner.git refs/heads/fork/production | cut -f1)"
+          if [ "$current_sha" != "$SOURCE_SHA" ]; then
+            echo "Production advanced; retaining the candidate image without changing latest."
+            exit 1
+          fi
+          docker buildx imagetools create \
+            --tag ghcr.io/eb-plum/twitch-drops-miner:latest \
+            "ghcr.io/eb-plum/twitch-drops-miner@$IMAGE_DIGEST"
+
+      - name: Record rollback digest
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          printf 'Source: `%s`\n\nImage: `ghcr.io/eb-plum/twitch-drops-miner@%s`\n' "$SOURCE_SHA" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"

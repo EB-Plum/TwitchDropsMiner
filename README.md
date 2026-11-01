@@ -1,5 +1,9 @@
 # Twitch Drops Miner
 
+> **EB-Plum deployment:** `main` mirrors upstream; personal GHCR/Compose deployment
+> lives on `fork/production`. See [fork maintenance and deployment](FORK_MAINTENANCE.md).
+
+
 Automatically earn timed Twitch Drops without downloading stream video or audio.
 Mining reads playlist metadata and checks segment response headers to keep bandwidth low.
 

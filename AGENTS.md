@@ -1,5 +1,22 @@
 # Agent Instructions
 
+## EB-Plum fork operations (takes precedence for fork maintenance)
+
+- `main` is an exact upstream mirror: never commit fork changes there. Update it
+  fast-forward only after the one-time, explicitly authorized migration.
+- Personal deployment changes target `fork/production`, via `codex/` topic branches.
+  Preserve merge ancestry; do not squash upstream synchronization or rewrite the
+  shared production branch. Follow `FORK_MAINTENANCE.md`.
+- `fork-ci.yml` owns fork validation and GHCR publication. Publishing must depend on
+  all validation jobs and require this repository's exact production push ref. PRs
+  must remain read-only and never publish. Do not enable upstream publishing or
+  contributor automation in this fork. Keep upstream workflow files unmodified.
+- Audit newly added upstream workflows before each mirror update; repository-level
+  workflow disabling is configuration, not part of the mirror's Git tree.
+- Keep normal upstream contribution instructions for contributions to rangermix;
+  this fork's operational PRs target EB-Plum's `fork/production` instead.
+
+
 
 ## Repository Instructions
 
