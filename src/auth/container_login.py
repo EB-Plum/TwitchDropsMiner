@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import socket
@@ -17,6 +18,7 @@ import aiohttp
 from src.auth.server_renewal import OwnedChromium
 from src.auth.session_bundle import SessionError
 from src.auth.session_controller import SessionController
+from src.auth.session_diagnostics import SessionDiagnostic
 from src.auth.session_helper import BrowserExporter, DevToolsConnection
 from src.config.paths import DATA_DIR
 
@@ -212,8 +214,9 @@ class LoginChromium:
         if capture:
             port = loopback_port()
             self.address = f"http://127.0.0.1:{port}"
-            args.extend(["--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={port}", "about:blank"])
+            args.extend(["--disable-extensions", "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={port}", "about:blank"])
         else:
+            args.append(f"--load-extension={Path(__file__).with_name('login_completion')}")
             args.append("https://www.twitch.tv/login")
         self.process = await asyncio.create_subprocess_exec(
             *args, env={**self.environment,
@@ -236,6 +239,16 @@ class LoginChromium:
         self.isolation = BrowserIsolation()
         self.profile = self.isolation.directory("tdm-login-")
         try:
+            preferences = self.profile / "Default"
+            preferences.mkdir(mode=0o700)
+            self.isolation.own(preferences)
+            preferences = preferences / "Preferences"
+            preferences.write_text(json.dumps({
+                "credentials_enable_service": False,
+                "profile": {"password_manager_enabled": False},
+            }), encoding="utf-8")
+            preferences.chmod(0o600)
+            self.isolation.own(preferences)
             (self.profile / "tmp").mkdir(mode=0o700)
             self.isolation.own(self.profile / "tmp")
             await self.launch()
@@ -345,6 +358,7 @@ class ContainerLogin:
         self.desktop_factory, self.browser_factory = desktop_factory, browser_factory
         self.state, self.attempt = "idle", 0
         self.error: str | None = None
+        self.diagnostic: SessionDiagnostic | None = None
         self.desktop: ContainerDesktop | None = None
         self.browser: LoginChromium | None = None
         self._task: asyncio.Task | None = None
@@ -353,10 +367,12 @@ class ContainerLogin:
         self._finish_lock = asyncio.Lock()
 
     def status(self) -> dict[str, Any]:
-        return {"state": self.state, "error": self.error, "attempt": self.attempt}
+        return {"state": self.state, "error": self.error, "attempt": self.attempt,
+                "diagnostic": self.diagnostic.to_dict() if self.diagnostic else None}
 
-    def change(self, state: str, error: str | None = None) -> None:
+    def change(self, state: str, error: str | None = None, *, diagnostic: SessionDiagnostic | None = None) -> None:
         self.state, self.error = state, error
+        self.diagnostic = diagnostic
         self.on_change()
 
     def request_login(self) -> None:
@@ -374,31 +390,49 @@ class ContainerLogin:
 
     async def _run(self, attempt: int) -> None:
         error = None
+        diagnostic = None
+        stage = "browser_start"
         try:
             async with self.desktop_factory() as desktop:
                 self.desktop = desktop
                 async with self.browser_factory(desktop.environment) as browser:
                     self.browser = browser
-                    self.change("sign_in")
-                    assert browser.process is not None
-                    await asyncio.wait_for(browser.process.wait(), 900)
-                    self.change("verifying")
-                    seed = await browser.capture()
-                    await self.controller.accept(seed, authorized=lambda: attempt == self.attempt and not self._stopped)
-                    self._needed = False
+                    try:
+                        self.change("sign_in")
+                        stage = "browser_login"
+                        assert browser.process is not None
+                        await asyncio.wait_for(browser.process.wait(), 900)
+                        self.change("verifying")
+                        stage = "browser_capture"
+                        seed = await browser.capture()
+                        stage = "helper_admission"
+                        await self.controller.accept(seed, authorized=lambda: attempt == self.attempt and not self._stopped)
+                        self._needed = False
+                    except SessionError as failure:
+                        failure.annotate(stage=stage)
+                        raise
+                    except TimeoutError:
+                        raise SessionError("LOGIN_TIMEOUT", stage=stage, reason="timeout") from None
+                    except Exception:
+                        raise SessionError("BROWSER_FAILED", stage=stage, reason="unexpected_exception") from None
+                    finally:
+                        stage = "browser_cleanup"
         except asyncio.CancelledError:
             pass
         except SessionError as failure:
-            error = failure.code
+            failure.annotate(stage="browser_cleanup" if failure.code in ("BROWSER_STOP", "BROWSER_CLOSE") else stage)
+            error, diagnostic = failure.diagnostic.code, failure.diagnostic
         except TimeoutError:
             error = "LOGIN_TIMEOUT"
+            diagnostic = SessionDiagnostic(error, stage=stage, reason="timeout")
         except Exception:
             # Process/cleanup diagnostics must never expose a credential or exception text.
             error = "BROWSER_FAILED"
+            diagnostic = SessionDiagnostic(error, stage=stage, reason="unexpected_exception")
         finally:
             self.browser = self.desktop = None
             self._task = None
-            self.change("error" if error else "idle", error)
+            self.change("error" if error else "idle", error, diagnostic=diagnostic)
 
     async def finish(self) -> dict[str, Any]:
         async with self._finish_lock:

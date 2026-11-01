@@ -192,8 +192,50 @@ header h1 {
     background-color: var(--hover-bg);
 }
 
+.pause-control {
+    position: relative;
+}
+
+#pause-btn.paused {
+    background: var(--accent-color);
+    border-color: var(--accent-color);
+    color: white;
+}
+
+.pause-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    min-width: 170px;
+    padding: 4px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.pause-menu button {
+    padding: 8px 10px;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.pause-menu button:hover,
+.pause-menu button:focus-visible {
+    background: var(--bg-secondary);
+}
+
 .button-group {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-top: 8px;
 }
@@ -529,6 +571,51 @@ header h1 {
     align-items: flex-start;
 }
 
+/* Inventory filter bar: search and actions on top, labelled groups of toggle chips below.
+   The game search input is the anchor: toolbar controls pin to its row and match its 40px
+   height, growing only when a wrapped translated label needs more room. */
+.inventory-filters .filter-controls { gap: 14px; }
+.inventory-filters .filter-search { align-items: flex-end; flex-wrap: wrap; }
+.inventory-filters .game-dropdown-container { flex: 1 1 260px; }
+.inventory-filters #inventory-game-search { height: 40px; }
+.filter-toolbar-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+/* min-height keeps single-line controls aligned with the 40px search input while
+   letting buttons grow for wrapped translated labels at narrow viewports. */
+.filter-toolbar-actions .small-btn { min-height: 40px; }
+.reload-campaigns-btn { display: inline-flex; align-items: center; gap: 6px; }
+.reload-campaigns-btn .reload-icon { font-size: 15px; line-height: 1; }
+.reload-campaigns-btn:disabled { opacity: 0.6; cursor: wait; }
+.reload-campaigns-btn[aria-busy="true"] .reload-icon { animation: reload-spin 1s linear infinite; }
+@keyframes reload-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .reload-campaigns-btn[aria-busy="true"] .reload-icon { animation: none; }
+}
+.inventory-filters .filter-checkboxes { gap: 10px 28px; padding-top: 14px; border-top: 1px solid var(--border-color); }
+.filter-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.filter-group-label { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-right: 2px; }
+.inventory-filters .filter-checkbox {
+    position: relative; padding: 5px 12px; gap: 0;
+    border: 1px solid var(--border-color); border-radius: 999px; background: var(--bg-secondary);
+    transition: background 0.15s, border-color 0.15s;
+}
+/* The native checkbox stays focusable and clickable over the whole chip; browsers
+   without :has() keep it visible because they cannot show the chip's checked state. */
+@supports selector(:has(*)) {
+    .inventory-filters .filter-checkbox input[type="checkbox"] {
+        position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0;
+    }
+}
+.inventory-filters .filter-checkbox span { font-size: 13px; }
+.inventory-filters .filter-checkbox:hover { border-color: var(--accent-color); }
+.inventory-filters .filter-checkbox:has(input:checked) { background: var(--accent-color); border-color: var(--accent-color); }
+.inventory-filters .filter-checkbox:has(input:checked) span { color: #fff; }
+.inventory-filters .filter-checkbox:has(input:checked) span::before {
+    content: "✓"; content: "✓" / ""; /* decorative: the checkbox already announces its state */
+    margin-right: 6px;
+}
+.inventory-filters .filter-checkbox:has(input:focus-visible) { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+.inventory-filters #filter-link-status { width: auto; padding: 5px 10px; border-radius: 999px; font-size: 13px; }
+
 .game-dropdown-container {
     position: relative;
     flex: 1;
@@ -659,9 +746,14 @@ header h1 {
 
 /* Inventory - card view (default) */
 .inventory-grid {
-    column-width: 350px;
-    column-gap: 20px;
+    --inventory-card-min: 350px; /* read by inventoryColumnCount() */
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
 }
+.inventory-grid > .empty-message { flex: 1; }
+/* Each column stacks its own cards, so an opened card only moves the cards below it. */
+.inventory-column { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: inherit; }
 
 .campaign-card {
     background: var(--bg-panel);
@@ -669,8 +761,6 @@ header h1 {
     border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-    break-inside: avoid;
-    margin-bottom: 20px;
 }
 
 .campaign-info {
@@ -684,19 +774,122 @@ header h1 {
     display: flex;
     flex-direction: column;
     gap: 15px;
+    align-items: stretch;
 }
 
 .inventory-grid.list-view .campaign-card {
-    display: flex;
-    align-items: stretch;
-    margin-bottom: 0;
+    display: block;
 }
 
 .inventory-grid.list-view .campaign-info {
-    flex: 0 0 320px;
+    flex: none;
     min-width: 0;
     background: var(--bg-secondary);
-    border-right: 1px solid var(--border-color);
+    border-right: none;
+}
+
+.campaign-overview {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 128px;
+    grid-template-rows: minmax(80px, auto) minmax(80px, auto);
+    align-items: center;
+    gap: 8px 12px;
+    padding: 12px 16px;
+    min-width: 0;
+}
+.campaign-overview > .campaign-game { grid-column: 1; grid-row: 1; min-width: 0; font-size: 14px; }
+.campaign-controls { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; align-self: start; }
+.campaign-controls > .campaign-badge { position: static; cursor: default; white-space: nowrap; }
+.campaign-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    cursor: pointer;
+}
+.campaign-toggle:hover { background: var(--bg-secondary); }
+.campaign-toggle:focus-visible, .inventory-add-game:focus-visible, .campaign-actions a:focus-visible {
+    outline: 2px solid var(--accent-color); outline-offset: -3px;
+}
+.campaign-titles { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.campaign-game-name, .campaign-name-text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.campaign-titles > .campaign-name-link { max-width: 100%; }
+.campaign-name-link .external-link-icon { flex-shrink: 0; }
+.campaign-overview { cursor: pointer; }
+.campaign-overview:hover:not(:has(a:hover, button:hover, .campaign-badge:hover)) .campaign-toggle { background: var(--bg-secondary); }
+.inventory-view-toggle { display: flex; gap: 4px; }
+.inventory-view-btn {
+    display: flex; align-items: center; justify-content: center; width: 34px; height: 40px; padding: 0;
+    border: 1px solid var(--border-color); border-radius: 5px; background: transparent;
+    color: var(--text-secondary); cursor: pointer;
+}
+.inventory-view-btn svg { width: 16px; height: 16px; fill: currentColor; }
+.inventory-view-btn:hover { background: var(--bg-secondary); }
+.inventory-view-btn[aria-pressed="true"] { border-color: var(--accent-color); color: var(--accent-color); }
+.inventory-view-btn:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+.campaign-subtitle { color: var(--text-secondary); font-size: 13px; font-weight: normal; }
+.campaign-date-range { grid-column: 1; grid-row: 2; display: flex; flex-direction: column; gap: 4px; min-width: 0; overflow-wrap: anywhere; color: var(--text-secondary); font-size: 12px; }
+.campaign-chevron {
+    width: 9px; height: 9px;
+    border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+    transform: rotate(45deg); transition: transform .15s;
+}
+.campaign-toggle[aria-expanded="true"] .campaign-chevron { transform: rotate(225deg); }
+.campaign-actions { grid-column: 2; grid-row: 2; display: flex; align-items: center; justify-content: flex-end; min-width: 0; }
+.campaign-actions > button, .campaign-actions > a { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: center; }
+.campaign-actions .link-account-btn { width: auto; margin: 0; text-decoration: none; }
+.inventory-add-game {
+    padding: 9px 12px; border: 1px solid var(--accent-color); border-radius: 5px;
+    background: transparent; color: var(--accent-color); font: inherit; font-size: 13px;
+    cursor: pointer; line-height: 1.4;
+}
+.inventory-add-game:hover { background: var(--bg-secondary); }
+.inventory-add-game:disabled { opacity: .6; cursor: wait; }
+.campaign-content { border-top: 1px solid var(--border-color); }
+.campaign-content .campaign-info { padding: 12px 16px 0; background: transparent; }
+.campaign-content .campaign-status { padding: 0; gap: 12px; flex-wrap: wrap; }
+.inventory-grid.list-view .campaign-overview {
+    grid-template-columns: minmax(0, 1fr) auto 180px;
+    grid-template-rows: minmax(32px, auto) minmax(60px, auto);
+}
+.inventory-grid.list-view .campaign-game { grid-column: 1; grid-row: 1 / 3; }
+.inventory-grid.list-view .campaign-date-range { grid-column: 2; grid-row: 1 / 3; }
+.inventory-grid.list-view .campaign-controls { grid-column: 3; grid-row: 1; flex-direction: row-reverse; align-items: center; justify-content: flex-start; }
+.inventory-grid.list-view .campaign-actions { grid-column: 3; grid-row: 2; }
+.inventory-drop-progress { height: 5px; background: var(--progress-bg); border-radius: 5px; overflow: hidden; margin: 12px 0 8px; }
+.inventory-drop-progress > span { display: block; height: 100%; background: var(--accent-color); }
+.claimed .inventory-drop-progress > span { background: var(--success-color); }
+@media (max-width: 900px) {
+    .inventory-grid.list-view .campaign-overview {
+        grid-template-columns: minmax(0, 1fr) 128px;
+        grid-template-rows: minmax(80px, auto) minmax(80px, auto);
+    }
+    .inventory-grid.list-view .campaign-game { grid-column: 1; grid-row: 1; }
+    .inventory-grid.list-view .campaign-date-range { grid-column: 1; grid-row: 2; }
+    .inventory-grid.list-view .campaign-controls { grid-column: 2; grid-row: 1; flex-direction: column; align-items: flex-end; }
+    .inventory-grid.list-view .campaign-actions { grid-column: 2; grid-row: 2; }
+}
+@media (max-width: 480px) {
+    /* Narrow cards keep the badge top-right with the arrow under it; names use two lines. */
+    /* Rows fit a two-line badge above the arrow and a four-line translated action, so heights stay equal. */
+    .campaign-overview, .inventory-grid.list-view .campaign-overview {
+        grid-template-columns: minmax(0, 1fr) 104px;
+        grid-template-rows: minmax(84px, auto) minmax(96px, auto);
+    }
+    .campaign-overview .campaign-game { gap: 10px; }
+    .campaign-overview .campaign-game .game-icon { width: 40px; height: 54px; }
+    .campaign-controls > .campaign-badge { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: center; }
+    .campaign-game-name, .campaign-name-text {
+        display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+        white-space: normal; overflow-wrap: anywhere; line-height: 1.3;
+    }
 }
 
 .campaign-header {
@@ -751,8 +944,7 @@ header h1 {
     border-radius: 4px;
     font-size: 11px;
     font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
+    cursor: default;
     z-index: 10;
 }
 
@@ -769,37 +961,20 @@ header h1 {
     box-shadow: 0 2px 4px rgba(255, 167, 38, 0.3);
 }
 
-.campaign-badge.not-linked:hover {
-    background: #ff9800;
-    transform: translateY(-1px);
-    box-shadow: 0 3px 6px rgba(255, 167, 38, 0.4);
-}
+
 
 .link-account-btn {
-    margin-top: 8px;
-    padding: 8px 16px;
-    background: var(--warning-color);
-    color: white;
-    border: none;
-    border-radius: 6px;
+    padding: 9px 12px;
+    background: transparent;
+    color: var(--accent-color);
+    border: 1px solid var(--accent-color);
+    border-radius: 5px;
+    font: inherit;
     font-size: 13px;
-    font-weight: 600;
     cursor: pointer;
-    transition: all 0.2s;
-    box-shadow: 0 2px 4px rgba(255, 167, 38, 0.3);
-    width: 100%;
+    line-height: 1.4;
 }
-
-.link-account-btn:hover {
-    background: #ff9800;
-    transform: translateY(-1px);
-    box-shadow: 0 3px 6px rgba(255, 167, 38, 0.4);
-}
-
-.link-account-btn:active {
-    transform: translateY(0);
-    box-shadow: 0 1px 2px rgba(255, 167, 38, 0.3);
-}
+.link-account-btn:hover { background: var(--bg-secondary); }
 
 .campaign-status {
     padding: 10px 15px;
@@ -823,10 +998,17 @@ header h1 {
     flex: 1;
     min-width: 0;
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
     gap: 10px;
     align-content: start;
 }
+
+.campaign-content .benefits-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+}
+.campaign-content .benefit-info { flex-direction: column; align-items: flex-start; gap: 2px; overflow-wrap: anywhere; }
+.campaign-content .drop-item-header { overflow-wrap: anywhere; }
 
 
 .empty-message-small {
@@ -935,17 +1117,47 @@ header h1 {
     font-size: 11px;
     margin-bottom: 4px;
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    gap: 6px;
-    padding: 4px;
+    gap: 8px;
+    padding: 6px;
     background: var(--bg-secondary);
     border-radius: 4px;
+}
+
+.wanted-drop-icon {
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    object-fit: contain;
+    border-radius: 4px;
+}
+
+.wanted-drop-info {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 6px;
+    flex: 1;
+    min-width: 0;
 }
 
 .wanted-drop-name {
     font-weight: 600;
     color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+.wanted-drop-info .inventory-drop-progress {
+    flex-basis: 100%;
+    margin: 2px 0 0;
+}
+
+.wanted-drop-minutes {
+    color: var(--text-secondary);
+    font-size: 10px;
 }
 
 .wanted-benefit-pill {
@@ -955,6 +1167,11 @@ header h1 {
     border-radius: 8px;
     font-size: 10px;
     font-weight: 500;
+}
+
+.wanted-drop-info .wanted-benefit-pill {
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 
 
@@ -1065,6 +1282,33 @@ header h1 {
     max-width: 800px;
 }
 
+.settings-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 20px;
+}
+
+.settings-tab-button {
+    padding: 8px 14px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.settings-tab-button:hover {
+    color: var(--text-primary);
+}
+
+.settings-tab-button.active {
+    background: var(--accent-color);
+    border-color: var(--accent-color);
+    color: white;
+}
+
 .settings-section {
     background: var(--bg-panel);
     border: 1px solid var(--border-color);
@@ -1088,7 +1332,9 @@ header h1 {
 
 .settings-section select,
 .settings-section input[type="number"],
-.settings-section input[type="text"] {
+.settings-section input[type="text"],
+#discord-webhook-url,
+#telegram-bot-token {
     padding: 8px;
     border: 1px solid var(--border-color);
     border-radius: 4px;
@@ -1243,6 +1489,7 @@ header h1 {
 
 .filter-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
 }
 
@@ -1272,6 +1519,7 @@ header h1 {
 
 .selected-games,
 .available-games {
+    min-width: 0;
     border: 1px solid var(--border-color);
     border-radius: 8px;
     padding: 15px;
@@ -1306,6 +1554,10 @@ header h1 {
     user-select: none;
 }
 
+#selected-games-list .sortable-item {
+    flex-wrap: wrap;
+}
+
 .sortable-item:hover {
     border-color: var(--accent-color);
     background: rgba(145, 70, 255, 0.1);
@@ -1325,6 +1577,16 @@ header h1 {
 .drag-handle:active {
     cursor: grabbing;
 }
+
+/* Reward types: one list for mined types and their optional preferred order */
+.reward-type-list { margin: 12px 0 0; max-width: 480px; }
+.reward-type-row .reward-type-label { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; margin: 0; cursor: pointer; }
+.reward-type-row .reward-type-label input[type="checkbox"] { margin: 0; }
+.reward-type-excluded { color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+.reward-type-row.excluded .reward-type-label span { color: var(--text-secondary); text-decoration: line-through; }
+.reward-type-list:not(.ordered) .sortable-item { cursor: default; }
+.reward-type-list:not(.ordered) .sortable-item:hover { border-color: var(--border-color); background: var(--bg-panel); }
+.reward-type-list:not(.ordered) .drag-handle, .reward-type-list:not(.ordered) .priority-input { display: none; }
 
 .priority-number {
     display: inline-flex;
@@ -1420,6 +1682,27 @@ header h1 {
 
 .game-checkbox span {
     user-select: none;
+}
+
+.game-link-badge {
+    margin-inline-start: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.game-link-badge.linked {
+    background: rgba(0, 200, 83, 0.15);
+    color: var(--success-color);
+    border: 1px solid rgba(0, 200, 83, 0.3);
+}
+
+.game-link-badge.not-linked {
+    background: rgba(255, 167, 38, 0.15);
+    color: var(--warning-color);
+    border: 1px solid rgba(255, 167, 38, 0.3);
 }
 
 /* Loading Overlay */
@@ -1639,8 +1922,8 @@ header h1 {
     }
 
     .inventory-grid {
-        column-width: 280px;
-        column-gap: 12px;
+        --inventory-card-min: 280px;
+        gap: 12px;
     }
 
     .help-content {
@@ -1674,20 +1957,9 @@ header h1 {
         flex: 1 1 40%;
     }
 
-    /* column-width switches to single-column below this anyway since no card
-       fits two 280px columns at this viewport, but drop the min width so a
-       narrower phone doesn't get a horizontal scrollbar from the column box. */
-    .inventory-grid {
-        column-width: auto;
-    }
 
-    .filter-separator {
-        display: none;
-    }
-
-    #clear-filters-btn {
-        width: 100%;
-    }
+    .filter-toolbar-actions { width: 100%; }
+    .filter-toolbar-actions .small-btn { flex: 1; }
 }
 
 /* Footer */
@@ -1993,11 +2265,17 @@ header h1 {
     display: none;
 }
 
+/* Connection pill and language select share one box size so they match in the header. */
 #connection-indicator {
-    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 32px;
+    min-width: 110px;
+    font-size: 13px;
     font-weight: 500;
-    padding: 3px 10px;
-    border-radius: 5px;
+    padding: 0 10px;
+    border-radius: 4px;
     border: 1px solid transparent;
     white-space: nowrap;
 }
@@ -2013,7 +2291,9 @@ header h1 {
 }
 
 .language-selector select {
-    padding: 6px 10px;
+    height: 32px;
+    min-width: 110px;
+    padding: 0 10px;
     font-size: 13px;
 }
 
@@ -2260,6 +2540,46 @@ header h1 {
     padding: 28px;
 }
 
+/* Temporary queue order: drag a game card by its ☰ cue; the note and Reset sit under the title. */
+.wanted-order-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.wanted-order-error {
+    margin: 0 14px 10px;
+    font-size: 12px;
+    color: var(--error-color);
+}
+
+.wanted-game-group[draggable="true"] .wanted-game-header {
+    cursor: grab;
+}
+
+.wanted-game-group.dragging {
+    opacity: 0.5;
+}
+
+.wanted-drag-handle {
+    order: 3;
+    margin-left: auto;
+    align-self: center;
+    padding: 0 12px;
+}
+
+@media (pointer: coarse) {
+    /* A held card must not trigger text selection or the long-press menu. */
+    .wanted-game-group {
+        -webkit-touch-callout: none;
+        user-select: none;
+    }
+}
+
 .channels-list {
     height: auto;
     max-height: 340px;
@@ -2344,6 +2664,27 @@ header h1 {
     margin: 14px auto 0;
     padding: 8px 14px;
     font-size: 12px;
+}
+
+/* Keep the footer at the window bottom so tabs of different heights don't move it. */
+#dashboard {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    min-height: 100dvh; /* excludes mobile browser bars where supported */
+}
+
+#dashboard > .tab-content.active {
+    flex: 1 0 auto;
+}
+
+#dashboard > .footer {
+    width: 100%;
+}
+
+/* Flex items don't collapse margins, so drop the last section's own gap above the footer. */
+.settings-panel > .settings-section:last-child {
+    margin-bottom: 0;
 }
 
 .update-indicator {
@@ -2529,10 +2870,6 @@ header h1 {
         white-space: normal;
         overflow-wrap: anywhere;
     }
-}
-
-.language-selector select {
-    min-width: 110px;
 }
 
 .status-bar {
@@ -2788,3 +3125,40 @@ header h1 {
     font-size: 14px;
 }
 .browser-helper-downloads a { color: var(--accent-color); }
+
+/* Games tab: stretch both game lists down to the footer instead of stopping at 400px.
+   Desktop only; stacked lists on narrow screens keep their fixed heights. */
+@supports selector(:has(*)) {
+    @media (min-width: 1025px) {
+        #settings-tab.active:has(#settings-panel-games:not([hidden])),
+        .settings-container:has(#settings-panel-games:not([hidden])),
+        #settings-panel-games:not([hidden]),
+        #settings-panel-games > .settings-section,
+        #settings-panel-games .selected-games,
+        #settings-panel-games .available-games {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .settings-container:has(#settings-panel-games:not([hidden])),
+        #settings-panel-games:not([hidden]),
+        #settings-panel-games > .settings-section,
+        #settings-panel-games .selected-games,
+        #settings-panel-games .available-games {
+            flex: 1 1 0;
+        }
+
+        #settings-panel-games .games-container {
+            flex: 1 1 0;
+            min-height: 300px;
+            grid-template-rows: minmax(0, 1fr);
+        }
+
+        #settings-panel-games .sortable-list,
+        #settings-panel-games .checkbox-list {
+            flex: 1 1 0;
+            min-height: 0;
+            max-height: none;
+        }
+    }
+}

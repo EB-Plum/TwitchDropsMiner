@@ -182,11 +182,15 @@ exists; use closing keywords only when the PR fully resolves that issue.
   network failures, retries, and persistent state consistently with nearby code.
 - Add unit tests for backend code changes. For frontend behavior changes, add automated
   coverage where practical; explain any gap and provide a reproducible manual check.
-- Update `README.md` and the canonical `AGENTS.md` with the relevant behavior or
-  workflow changes. Keep `CLAUDE.md` and `GEMINI.md` as relative symbolic links to
-  `AGENTS.md`; do not replace them with duplicated text. Put agent-specific guidance
-  in clearly named sections of `AGENTS.md`. Update this guide when the contribution
-  workflow changes.
+- Update documentation where the change belongs. Update `README.md` only when its
+  overview, setup, login, migration, or links need to change; put detailed behavior,
+  implementation explanations, and troubleshooting in the relevant `docs/` guide.
+  Update the canonical `AGENTS.md` when agent instructions or architectural constraints
+  change, and this guide when the contribution workflow changes. A code change does
+  not automatically require editing either `README.md` or `AGENTS.md`.
+  Keep `CLAUDE.md` and `GEMINI.md` as relative symbolic links to `AGENTS.md`; do not
+  replace them with duplicated text. Put agent-specific guidance in clearly named
+  sections of `AGENTS.md`.
 - For UI or console text changes, update the English source, every affected locale in
   `lang/`, and the TypedDict translation schema when keys change. Preserve key and
   placeholder parity. Build translated UI using `textContent` and safe DOM APIs;
@@ -226,6 +230,10 @@ existing issues from regressions, and fix new problems introduced by the PR. A g
 workflow does not prove that Mypy was clean. Node.js 24 must be on `PATH`; investigate
 skipped frontend tests rather than claiming they passed.
 
+CI runs Ruff without automatic fixes so it checks the submitted source. Apply any
+lint fixes locally and review the resulting diff before pushing; CI must fail for
+remaining violations instead of silently repairing its own checkout.
+
 Also run these release-script contract tests with Bash and GNU `grep`/`sed` on `PATH`.
 The scripts use `grep -P` and GNU-style `sed -i`; macOS's default utilities are not
 sufficient. On macOS, select GNU tools or use a Linux container/VM. On Windows, use
@@ -243,7 +251,7 @@ Select additional regression checks from the actual impact of the change:
 | --- | --- |
 | Mining, inventory, or channel selection | Eligibility and timing boundaries, prerequisites, ignored drops, claim behavior, and neighboring selection paths |
 | Settings or persistence | Save/reload round trips, defaults/migration, invalid input, and failure handling |
-| Dashboard or translations | Relevant Node/DOM tests, locale schema and placeholder checks, and a browser check of the affected flow |
+| Dashboard or translations | Relevant Node/DOM tests, locale schema and placeholder checks, a browser check of the affected flow, and redacted screenshots of visual changes |
 | Authentication or API access | Unauthorized requests, origin/CSRF handling, session expiry/revocation, and absence of leaked credentials |
 | Dependencies, Docker, or CI/release scripts | Lock/version consistency, relevant script tests, and Docker build/workflow validation |
 | Documentation only | Accurate commands and paths, working local links, Markdown structure, canonical agent guidance, and valid instruction symlinks |
@@ -258,6 +266,13 @@ pytest, language JSON validation, lockfile checks, release-script tests, and Doc
 builds for both supported image architectures. Required CI must pass on the final PR
 revision before merge. After review fixes or main integration, rerun the checks affected
 by those changes; do not rely on results from a superseded revision.
+
+Native helper artifacts use pinned Node-24-native transfer actions on GitHub-hosted
+runners. Preserve the named ZIP wrappers around the helper tar archives and keep
+downloads in the same workflow run without extra credentials. Download digest mismatches
+fail the job before archive validation or publication. Local workflow contract tests
+do not prove a hosted artifact round trip; validate workflow upgrades through fork CI
+without dispatching a publishing workflow.
 
 ### 4. Obtain an independent adversarial review
 
@@ -293,9 +308,50 @@ collect feedback and CI results while tests or independent review are still pend
 
 Use the [PR template](./.github/pull_request_template.md). Explain the original problem,
 resulting behavior, scope, linked issues, test commands/results, regression coverage,
-adversarial review, and remaining limitations. Include before/after screenshots for
-visible UI changes when useful. Mark work in progress as a draft; do not describe a
-partial implementation or unavailable check as complete.
+adversarial review, and remaining limitations. Mark work in progress as a draft; do
+not describe a partial implementation or unavailable check as complete.
+
+Every change to the dashboard's appearance (layout, styling, new or changed UI text,
+icons or controls) must include screenshots of the result in the PR description, with
+before/after screenshots when an existing view changes. "Before" shows the base branch
+(normally current `main`) without any change from the PR, not an earlier PR revision,
+using the same data and viewport as "after". Cover each affected view and, for layout
+changes, a narrow width. Translation-only string fixes may show one representative
+locale. Screenshots must not show personal information: prefer mock or sample data,
+otherwise crop or fully mask (not blur) Twitch usernames, avatars and IDs, your
+account's linked games and drop history, console output, email addresses, dashboard
+hostnames, IP addresses and URLs, proxy addresses or credentials, tokens, webhook URLs,
+chat IDs, and unrelated browser tabs or bookmarks, then save a new flattened image.
+Check every image before uploading: editing or replacing it later does not remove the
+original from GitHub. Attach images to the PR rather than committing them to the topic
+branch, unless the PR intentionally updates a published documentation image such as
+`screenshot.png`. Update screenshots when later revisions change the visible result.
+
+If you cannot attach images directly (for example from the command line), push them to
+a separate screenshots-only branch of your **public** fork instead, never to the topic
+branch, and link them from the PR description. For example, use a `pr-screenshots`
+branch with one folder per PR. A separate worktree leaves your topic branch and any
+uncommitted work untouched:
+
+```bash
+git fetch origin
+git worktree add ../pr-screenshots pr-screenshots \
+  || git worktree add --orphan -b pr-screenshots ../pr-screenshots  # first time (Git 2.42+)
+cd ../pr-screenshots \
+  && mkdir -p pr123 && cp /path/to/before-main.png /path/to/after-main.png pr123/ \
+  && git add pr123 && git commit -m "Add PR123 screenshots" \
+  && git push -u origin pr-screenshots \
+  && cd - && git worktree remove ../pr-screenshots
+```
+
+Then link each image with your GitHub user name and your fork's repository name:
+
+```markdown
+![Before](https://raw.githubusercontent.com/YOUR-USER/YOUR-FORK/pr-screenshots/pr123/before-main.png)
+```
+
+The same redaction rules apply, and pushed images cannot be reliably removed. Keep the
+branch after merging so the PR's images keep loading.
 
 Before requesting merge, confirm:
 
@@ -303,10 +359,12 @@ Before requesting merge, confirm:
 - [ ] The diff is focused and contains no secrets, local data, or unrelated changes.
 - [ ] Backend unit tests and applicable frontend/regression checks are included.
 - [ ] Required checks pass for the final revision; skips and limitations are recorded.
-- [ ] README, agent instructions, translations, and release notes/requirements are
-  updated where applicable under the rules above.
+- [ ] Relevant documentation, agent instructions, translations, and release
+  notes/requirements are updated where applicable under the rules above.
 - [ ] An independent adversarial review is recorded and blocking findings are resolved.
 - [ ] The PR description matches the final implementation and includes evidence.
+- [ ] Visual dashboard changes include current screenshots with personal information
+  hidden.
 
 Respond to review feedback respectfully and support technical disagreements with
 reproducible evidence. Maintainers decide when to merge and release. Contributor credit
@@ -363,8 +421,9 @@ The exporter uses an explicit page allowlist. Add a new public guide to that map
 and its tests deliberately; never replace it with a recursive copy of `docs/` or the
 checkout. Publishing runs only from the canonical repository's `main`, never PR code.
 
-Put personal plans, development notes, local verification records, screenshots, and
-captures in `.dev-notes/`. Git and Docker builds exclude that directory. This takes
+Put personal plans, development notes, local verification records, working screenshots,
+and captures in `.dev-notes/`; PR screenshots are redacted copies attached as described
+in section 5. Git and Docker builds exclude `.dev-notes/`. This takes
 precedence over agent skill templates that suggest committing `docs/plans/` or
 `docs/notes/`. Do not force-add private files. Keep concise, redacted test and review
 results in PR descriptions so changes remain reviewable without publishing working data.
@@ -376,13 +435,8 @@ Read this guide and the applicable agent instructions before planning, editing, 
 or reviewing. Pass these requirements to any delegated implementation or review agent.
 The checklist is a completion requirement, not an optional suggestion.
 
-When taking on an issue or PR, first comment there to acknowledge that work is starting
-and briefly state the scope, before investigation, implementation, or review. Acknowledge
-both threads when working on both an issue and a PR. Before ending or pausing work,
-update each thread with the outcome, relevant evidence or validation, and any remaining
-action or request for information. This applies to every outcome, including resolved,
-closed, no change needed, blocked, or more information needed, even if no code changed
-or the issue or PR remains open.
+Follow the [agent communication rules](./AGENTS.md#communication) for clear language,
+action items, and when to comment on issues or PRs.
 
 Inspect the current checkout and preserve existing user changes. Stay within the
 authorized task; a request to edit files does not by itself authorize publishing a PR,

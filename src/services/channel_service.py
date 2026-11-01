@@ -16,8 +16,10 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from src.config import GQL_OPERATIONS, MAX_INT
+from src.config.reward_priority import RewardPriority
 from src.exceptions import ExitRequest, GQLException, MinerException
 from src.models.channel import Channel
+from src.services.game_order import TemporaryGameOrder
 from src.utils import chunk
 
 
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from src.config import GQLRequest, JsonType
     from src.core.client import Twitch
     from src.models.game import Game
+    from src.services.game_order import TemporaryGameOrder
 
 
 logger = logging.getLogger("TwitchDrops")
@@ -102,6 +105,48 @@ class ChannelService:
         ):
             return MAX_INT
         return self._twitch.wanted_games.index(game)
+
+    def get_mining_priority(self, channel: Channel) -> tuple[float, ...]:
+        """A temporary dashboard order first, then the default mining priority."""
+        key = self._default_mining_priority(channel)
+        order = getattr(self._twitch, "game_order", None)
+        if not isinstance(order, TemporaryGameOrder) or not order.active:
+            return key
+        return (self._manual_rank(channel, order), *key)
+
+    def _manual_rank(self, channel: Channel, order: TemporaryGameOrder) -> int:
+        """Rank only wanted campaigns this channel can currently progress."""
+        if not channel.online or channel.banned:
+            return order.rank(None)
+        wanted = self._twitch.wanted_games
+        return min(
+            (order.rank(campaign.game.name) for campaign in self._twitch.inventory
+             if campaign.game in wanted and campaign.can_earn(channel)
+             and (campaign.game.is_special() or channel.drops_enabled)),
+            default=order.rank(None),
+        )
+
+    def _default_mining_priority(self, channel: Channel) -> tuple[int, int] | tuple[int, int, float, int]:
+        """Selected games first; optional reward type/deadline before game order."""
+        priority = self.get_priority(channel)
+        settings = getattr(self._twitch, "settings", None)
+        policy = RewardPriority(settings)
+        fallback = settings is not None and getattr(settings, "priority_list_only", True) is False
+        if not fallback and not policy.enabled:
+            return (0, priority)
+        selected_names = {name.lower() for name in getattr(settings, "games_to_watch", [])}
+        candidates = [campaign for campaign in self._twitch.inventory
+            if channel.online and not channel.banned
+            and campaign.game in self._twitch.wanted_games
+            and campaign.can_earn(channel)
+            and (campaign.game.is_special() or channel.drops_enabled)]
+        selected = [campaign for campaign in candidates if campaign.game.name.lower() in selected_names]
+        tier = 0 if not fallback or selected else 1
+        if not policy.enabled:
+            return (tier, priority)
+        rank, deadline = min((policy.campaign_key(campaign) for campaign in (selected or candidates)),
+                             default=(len(policy.TYPES), float("inf")))
+        return (tier, rank, deadline, priority)
 
     @staticmethod
     def get_viewers_key(channel: Channel) -> int:

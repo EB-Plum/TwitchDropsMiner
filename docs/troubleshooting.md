@@ -51,6 +51,65 @@ helper computer and that the access window is still open. `localhost` points to 
 helper computer itself. If the helper reports an unknown result, check the dashboard
 before trying again. Keep saved credentials and browser profiles private.
 
+## Helper login error codes
+
+Update both the miner and the helper to use the latest diagnostics. Known validation
+failures preserve their fixed `SESSION_*` code; unknown responses remain generic.
+`SESSION_CATALOG` means Twitch's inventory or campaign response failed validation.
+The miner log records only fixed error categories and field shapes, never response
+values or credentials. A catalog error does not by itself identify a browser rejection.
+Report the code and a timestamped, redacted log excerpt. Keep browser profiles, session
+files, cookies, tokens and passwords private.
+
+TDM also prints a `SESSION_DIAGNOSTIC` JSON line
+after the translated helper explanation. A matching diagnostic is available as
+`helper.diagnostic`, `browser.diagnostic` or `renewal_diagnostic` in `/api/session`.
+Published helpers need a release containing this update; updating only the miner does
+not update the helper executable on your computer.
+
+| Field | Meaning |
+| --- | --- |
+| `code` | Fixed failure code, without the displayed `SESSION_` prefix |
+| `stage` | The step that failed; see below |
+| `reason` | A fixed failure classification such as `integrity`, `headless_fallback`, `timeout`, `tls`, `connection`, or `catalog_shape`; `unknown` means the available response does not establish a specific classification |
+| `operation` | `identity`, `Inventory`, `Campaigns`, or `catalog` when known |
+| `http_status` | The dashboard/helper protocol HTTP response status, when received |
+| `upstream_status` | Twitch's HTTP response status, when known; this is separate from the dashboard status |
+
+For example, `code=CATALOG`, `stage=captured_validation`, `reason=integrity`,
+`operation=Campaigns` identifies Twitch's integrity rejection while checking the
+original captured session. The same code at `issued_validation` means the independently
+issued server session failed. The original session is still not installed in either
+case. `reason=headless_fallback` at `issued_validation` or `renewal_validation` means
+Twitch rejected a proof issued by the headless renewal browser. This identifies the
+browser mode and rejection together; it does not establish why Twitch rejected the
+proof. On a Linux source installation, install `xvfb` and
+`xauth` (Debian/Ubuntu: `sudo apt install xvfb xauth`), or use Docker. Renewal retries
+pick up the change; after a failed sign-in, sign in again. Other useful stages are:
+
+| Stage | What to check |
+| --- | --- |
+| `helper_configuration`, `helper_connect` | Dashboard URL, [`--ca-file` certificate or `--insecure` address](authentication.md#helper-https-certificates), reachable miner, enabled helper window, matching versions |
+| `browser_start`, `browser_login`, `browser_capture`, `browser_cleanup` | Helper desktop browser startup, manual sign-in/closing its windows, capture, or cleanup |
+| `helper_admission`, `seed_validation` | Helper access or the captured context's format and freshness |
+| `server_issuance`, `renewal_issuance` | The miner's SDK/browser acquisition step |
+| `issued_validation`, `renewal_validation` | Twitch validation of the newly issued context |
+| `persistence` | Saving private session state; retain the existing data mount and check its permissions/free space |
+| `session_upload`, `helper_receipt` | Upload or receipt transport; check the dashboard before retrying an unknown result |
+
+The error code remains useful when `reason=unknown`; no arbitrary Twitch response or
+exception text is copied into the diagnosis. An unknown receipt result does not prove
+that the session was rejected or installed. TDM checks receipts and never repeats a
+credential upload automatically.
+
+Twitch's visible "browser not supported" page occurs during interactive sign-in and
+can precede any captured session. `browser.state=sign_in`, `browser.error=null`, and
+`session.state=waiting` therefore do not establish a capture or validation error.
+For a helper failure, include its fixed diagnostic line, miner/helper versions and
+attempt time. This separates browser-side symptoms from original-session validation,
+server issuance, reissued-session validation and transport/storage failures. It does
+not establish why Twitch rejected a browser or guarantee that a new login will work.
+
 ## Startup fails while reading web_auth.json
 
 A traceback from `WebAuth.__init__` ending in `JSONDecodeError` identifies malformed
@@ -97,7 +156,8 @@ Check the campaign on Twitch and work through these conditions:
    campaign.
 2. The campaign and individual reward are active, and the reward is earned by
    watching rather than by subscribing or making a purchase.
-3. The game is in **Games to Watch**, and its reward type is enabled in **Mining Benefits**.
+3. The game is in **Settings → Games → Mining list**, and its reward type is ticked in
+   **Settings → Mining → Reward types**.
 4. Your ignored keywords do not exclude the reward or one of its prerequisites.
 5. An eligible participating channel is live. Some campaigns work only on a fixed
    list of channels.
@@ -107,21 +167,29 @@ Higher-priority games may take precedence. If **Manual Mode** is active, use
 **Return to Auto Mode** to follow your normal game priorities. Upcoming or sequential
 rewards in the queue may need to wait for their start time or earlier rewards.
 
-For **Special Events** or **IRL**, keep the campaign's category in Games to Watch;
+For **Special Events** or **IRL**, keep the campaign's category in Mining list;
 its participating channels may be streaming another category. See
 [channel selection](usage.md#special-events-and-irl-campaigns).
 
-Try **Reload** after correcting settings. **Clear All Cache** can rebuild local
-campaign and channel data while keeping login, settings, and dashboard protection.
-It cannot repair inaccurate campaign information supplied by Twitch.
+Try **Reload Campaigns** in Inventory or **Settings → Games** after correcting settings.
+**Settings → Account & Maintenance → Clear All Cache** can rebuild local campaign and
+channel data while keeping login, settings, and dashboard protection. It cannot repair
+inaccurate campaign information supplied by Twitch.
 
-Source builds exclude channels when Twitch reports any active ban for your account,
+TDM excludes channels when Twitch reports any active ban for your account,
 including temporary bans. A temporary ban stops excluding the channel at Twitch's
-reported expiry; otherwise a subsequent discovery or **Reload** must confirm that
+reported expiry; otherwise a subsequent discovery or **Reload Campaigns** must confirm that
 the ban is gone. Missing ban information does not create a ban. **Clear All Cache**
 preserves confirmed bans when a subsequent check fails, until expiry or a confirmed
 no-ban response. This does not override campaign eligibility or establish that Twitch
 will award progress.
+
+## The dashboard shows `invalid_host`
+
+The browser address uses a host name the dashboard does not trust. Use the miner's
+IP address, set `PUBLIC_BASE_URL` for a reverse proxy, or add the name to
+`ALLOWED_HOSTS`. If your proxy sends its own upstream name as the Host header, add that
+name too. See [allowed host names](dashboard-access.md#allowed-host-names).
 
 ## Dashboard writes or live updates fail behind a proxy
 
@@ -149,7 +217,7 @@ successful drop claim. See [Telegram notifications](notifications.md).
 
 ### Save diagnosis data
 
-In source builds, reproduce the problem and select **Settings → Dump diagnosis data**.
+Reproduce the problem and select **Settings → Account & Maintenance → Dump diagnosis data**.
 The result shows the saved JSON filename. With the supplied Docker mount
 `./data:/app/data`, find it in your host's `data/diagnostics` folder; inside the
 container it is `/app/data/diagnostics`. A named volume keeps it in that same container

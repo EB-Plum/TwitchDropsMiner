@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict, cast
@@ -7,6 +8,7 @@ from typing import Any, Literal, TypedDict, cast
 from yarl import URL
 
 from src.config import DEFAULT_LANG, SETTINGS_PATH
+from src.config.reward_priority import RewardPriority
 from src.utils import DropIgnorePolicy, json_load, json_save, merge_json
 
 
@@ -27,9 +29,12 @@ default_settings = {
     "allow_unlinked_campaigns": False,
     "connection_quality": 1,
     "dark_mode": False,
+    "discord_webhook_url": "",
     "drop_name_blacklist": [],
     "games_to_watch": [],
     "language": DEFAULT_LANG,
+    "priority_list_only": True,
+    "reward_priority": [],
     "inventory_filters": {
         "game_name_search": [],
         "show_active": False,
@@ -50,16 +55,49 @@ default_settings = {
         "EMOTE": True,
         "UNKNOWN": True,
     },
+    "mining_hours": {
+        "mode": "always",
+        "start": "08:00",
+        "end": "22:00",
+    },
     "proxy": "",
     "telegram_bot_token": "",
     "telegram_chat_id": "",
 }
 
 
+class MiningHoursSettings:
+    """Validate the complete daily schedule before it changes live policy."""
+
+    @staticmethod
+    def normalize(value: Any) -> dict[str, str]:
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"mode", "start", "end"}
+            or value.get("mode") not in ("always", "range")
+            or any(
+                not isinstance(value.get(key), str)
+                or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value[key]) is None
+                for key in ("start", "end")
+            )
+        ):
+            raise ValueError("Invalid mining hours")
+        return dict(value)
+
+
 class InventoryFilterSettings:
     """Normalize display filters and migrate the previous restrictive checkbox."""
 
     LINK_STATUSES = ("all", "linked", "not_linked")
+
+    @classmethod
+    def validate_update(cls, updates: Any) -> dict[str, Any]:
+        """Reject a filter update that is not an object or names an unknown link mode."""
+        if not isinstance(updates, dict) or (
+            "link_status" in updates and updates["link_status"] not in cls.LINK_STATUSES
+        ):
+            raise ValueError("Invalid inventory filters")
+        return updates
 
     @classmethod
     def normalize(
@@ -84,13 +122,17 @@ class Settings:
     allow_unlinked_campaigns: bool
     connection_quality: int
     dark_mode: bool
+    discord_webhook_url: str
     drop_name_blacklist: list[str]
     games_to_watch: list[str]
     language: str
+    reward_priority: list[str]
+    priority_list_only: bool
     inventory_filters: InventoryFilters
     inventory_list_view: bool
     minimum_refresh_interval_minutes: int
     mining_benefits: dict[str, bool]
+    mining_hours: dict[str, str]
     proxy: str
     telegram_bot_token: str
     telegram_chat_id: str
@@ -106,6 +148,9 @@ class Settings:
         settings["inventory_filters"] = InventoryFilterSettings.normalize(
             filters if isinstance(filters, dict) else {}
         )
+        if "mining_hours" in settings:
+            settings["mining_hours"] = MiningHoursSettings.normalize(settings["mining_hours"])
+        settings["reward_priority"] = RewardPriority.normalize(settings.get("reward_priority", []))
         merge_json(settings, default_settings)
         settings.pop("allow_helper_connection", None)
         for key, value in settings.items():
@@ -118,6 +163,8 @@ class Settings:
         )
 
     def save(self) -> None:
+        self.reward_priority = RewardPriority.normalize(self.reward_priority)
+        self.mining_hours = MiningHoursSettings.normalize(self.mining_hours)
         self.drop_name_blacklist = DropIgnorePolicy.normalize_keywords(
             self.drop_name_blacklist
         )

@@ -1,6 +1,7 @@
 """Browser ownership, state transitions, retry and resource cleanup."""
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -14,6 +15,46 @@ import pytest
 from src.auth.container_login import BrowserIsolation, ContainerDesktop, ContainerLogin, LoginChromium
 from src.auth.session_bundle import SessionError
 from tests.test_session_controller import seed
+
+
+@pytest.mark.asyncio
+async def test_password_saving_disabled_before_interactive_browser_starts(tmp_path, monkeypatch):
+    class Isolation:
+        def directory(self, prefix):
+            return tmp_path
+
+        def own(self, path):
+            pass
+
+    monkeypatch.setattr('src.auth.container_login.BrowserIsolation', Isolation)
+    browser = LoginChromium({})
+    browser.executable = 'chromium'
+
+    async def launch():
+        preferences = json.loads((tmp_path / 'Default/Preferences').read_text())
+        assert preferences['credentials_enable_service'] is False
+        assert preferences['profile']['password_manager_enabled'] is False
+        if os.name == 'posix':
+            assert (tmp_path / 'Default/Preferences').stat().st_mode & 0o777 == 0o600
+
+    browser.launch = launch
+    async with browser:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_completion_extension_only_loaded_during_interactive_login(tmp_path, monkeypatch):
+    launch = AsyncMock(return_value=SimpleNamespace(returncode=None))
+    monkeypatch.setattr('asyncio.create_subprocess_exec', launch)
+    monkeypatch.setattr('src.auth.container_login.loopback_port', lambda: 12345)
+    monkeypatch.setattr('src.auth.container_login.os.geteuid', lambda: 1000, raising=False)
+    browser = LoginChromium({})
+    browser.profile, browser.executable = tmp_path, 'chromium'
+    browser.check_ready = AsyncMock()
+    await browser.launch()
+    assert any(arg.startswith('--load-extension=') for arg in launch.call_args.args)
+    await browser.launch(capture=True)
+    assert not any(arg.startswith('--load-extension=') for arg in launch.call_args.args)
 
 
 class Desktop:
@@ -92,6 +133,29 @@ async def test_login_finishes_verifies_and_cleans_before_dashboard(attempt):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("capture_failure", [SessionError("CAPTURE_TIMEOUT"), RuntimeError("private capture")])
+async def test_cleanup_failure_has_its_own_stage_after_capture_failure(attempt, monkeypatch, capture_failure):
+    login, desktop, browsers = attempt
+
+    async def fail_cleanup(browser, *_args):
+        browser.closed = True
+        raise OSError("private profile path")
+
+    monkeypatch.setattr(Browser, "__aexit__", fail_cleanup)
+    login.request_login()
+    await state(login, "sign_in")
+    browsers[0].capture.side_effect = capture_failure
+    await login.finish()
+    await state(login, "error")
+    diagnostic = login.status()["diagnostic"]
+    assert diagnostic["code"] == "BROWSER_FAILED"
+    assert diagnostic["stage"] == "browser_cleanup"
+    assert diagnostic["reason"] == "unexpected_exception"
+    assert "private" not in str(login.status())
+    assert desktop.closed and browsers[0].closed
+
+
+@pytest.mark.asyncio
 async def test_capture_failure_is_redacted_and_retry_uses_new_attempt(attempt):
     login, desktop, browsers = attempt
     login.request_login()
@@ -99,9 +163,15 @@ async def test_capture_failure_is_redacted_and_retry_uses_new_attempt(attempt):
     browsers[0].capture.side_effect = SessionError("LOGIN_MISSING")
     await login.finish()
     await state(login, "error")
-    assert login.status() == {"state": "error", "error": "LOGIN_MISSING", "attempt": 1}
+    status = login.status()
+    assert {key: status[key] for key in ("state", "error", "attempt")} == {
+        "state": "error", "error": "LOGIN_MISSING", "attempt": 1,
+    }
+    assert status["diagnostic"]["code"] == "LOGIN_MISSING"
+    assert status["diagnostic"]["stage"] == "browser_capture"
     assert browsers[0].closed and desktop.closed
     await login.retry()
+    assert login.status()["diagnostic"] is None
     await state(login, "sign_in")
     assert len(browsers) == 2 and login.attempt == 2
     await login.stop()
