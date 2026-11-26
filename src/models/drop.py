@@ -34,6 +34,9 @@ def remove_dimensions(url: str) -> str:
 
 
 class BaseDrop:
+    # Sitewide reward groups have an event title and separate names for their rewards.
+    ignore_name_aliases: tuple[str, ...] = ()
+
     def __init__(
         self, campaign: DropsCampaign, data: JsonType, claimed_benefits: dict[str, datetime]
     ):
@@ -141,6 +144,14 @@ class BaseDrop:
         )
 
     @property
+    def claim_requires_account_link(self) -> bool:
+        """Require linking unless every benefit in the claim is a badge or emote."""
+        # Twitch claims the entire drop in one request, including any game rewards.
+        return not self.campaign.linked and not (
+            self.benefits and all(benefit.type.is_badge_or_emote() for benefit in self.benefits)
+        )
+
+    @property
     def can_claim(self) -> bool:
         # https://help.twitch.tv/s/article/mission-based-drops?language=en_US#claiming
         # "If you are unable to claim the Drop in time, you will be able to claim it
@@ -149,6 +160,7 @@ class BaseDrop:
             self.claim_id is not None
             and not self.is_claimed
             and datetime.now(timezone.utc) < self.campaign.ends_at + timedelta(hours=24)
+            and not self.claim_requires_account_link
         )
 
     def update_claim(self, claim_id: str) -> None:
@@ -174,6 +186,10 @@ class BaseDrop:
             return []
         return [benefit.name for benefit in self.benefits if benefit.is_wanted(allowed_benefits)]
 
+    # Reward drops announce grants from grantCount, not from the claim (see RewardCampaign).
+    quiet_claim: bool = False
+    single_attempt_claim: bool = False
+
     async def claim(self) -> bool:
         result = await self._claim()
         if result and not self.is_claimed:
@@ -182,22 +198,34 @@ class BaseDrop:
             # A mixed campaign can still earn unwanted rewards after its last
             # wanted claim. Rebuild policy so fallback can take over promptly.
             self._twitch.request_games_update()
-            claim_text = (
-                f"{self.campaign.game.name}\n"
-                f"{self.rewards_text()} "
-                f"({self.campaign.claimed_drops}/{self.campaign.total_drops})"
-            )
-            # two different claim texts, becase a new line after the game name
-            # looks ugly in the output window - replace it with a space
-            self._twitch.print(
-                _.t["status"]["claimed_drop"].format(drop=claim_text.replace("\n", " "))
-            )
-            await self._twitch.gui.broadcast_wanted_items_now()
-            await self._send_telegram_notification()
-            await self._send_discord_notification()
-        elif not result:
+            if not self.quiet_claim:
+                await self._announce_claim()
+        elif not result and not self.claim_requires_account_link:
             logger.error(f"Drop claim has potentially failed! Drop ID: {self.id}")
         return result
+
+    async def _announce_claim(self, progress: str | None = None) -> None:
+        """Print the claim, refresh the GUI and send the claim notifications.
+
+        progress replaces the "claimed/total" suffix, which means nothing for a grant.
+        """
+        if progress is None:
+            progress = f"{self.campaign.claimed_drops}/{self.campaign.total_drops}"
+        claim_text = f"{self.campaign.game.name}\n{self.rewards_text()} ({progress})"
+        # two different claim texts, becase a new line after the game name
+        # looks ugly in the output window - replace it with a space
+        self._twitch.print(
+            _.t["status"]["claimed_drop"].format(drop=claim_text.replace("\n", " "))
+        )
+        await self._twitch.gui.broadcast_wanted_items_now()
+        if self._claim_notifications_enabled():
+            await self._send_telegram_notification()
+            await self._send_discord_notification()
+
+    def _claim_notifications_enabled(self) -> bool:
+        """Only an explicit opt-out disables claim alerts; settings problems cannot block a claim."""
+        events = getattr(self._twitch.settings, "notification_events", None)
+        return not isinstance(events, dict) or events.get("drop_claimed") is not False
 
     async def _send_telegram_notification(self) -> None:
         """Notify once per successful claim without affecting the claim result."""
@@ -230,22 +258,25 @@ class BaseDrop:
         if not self.can_claim:
             return False
         try:
-            response = await self._twitch.gql_request(
-                GQL_OPERATIONS["ClaimDrop"].with_variables(
-                    {"input": {"dropInstanceID": self.claim_id}}
-                )
+            operation = GQL_OPERATIONS["ClaimDrop"].with_variables(
+                {"input": {"dropInstanceID": self.claim_id}}
             )
+            operation.single_attempt = self.single_attempt_claim
+            response = await self._twitch.gql_request(operation)
         except GQLException:
             # regardless of the error, we have to assume
             # the claiming operation has potentially failed
             return False
-        data = response["data"]
+        data = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(data, dict):
+            return False
         if "errors" in data and data["errors"]:
             return False
         elif "claimDropRewards" in data:
-            if not data["claimDropRewards"]:
+            if not isinstance(data["claimDropRewards"], dict):
                 return False
-            elif data["claimDropRewards"]["status"] in (
+            # Sitewide reward claims may answer without a status; treat as unconfirmed.
+            elif data["claimDropRewards"].get("status") in (
                 "ELIGIBLE_FOR_ALL",
                 "DROP_INSTANCE_ALREADY_CLAIMED",
             ):
@@ -263,6 +294,7 @@ class TimedDrop(BaseDrop):
         )
         self.required_minutes: int = data["requiredMinutesWatched"]
         self.extra_current_minutes: int = 0
+        self._claim_completion_observed = self.real_current_minutes >= self.required_minutes
         if self.is_claimed:
             # claimed drops may report inconsistent current minutes, so we need to overwrite them
             self.real_current_minutes = self.required_minutes
@@ -288,6 +320,16 @@ class TimedDrop(BaseDrop):
     def is_watch_drop(self) -> bool:
         """Return whether this drop can be earned by watching a stream."""
         return self.required_minutes > 0
+
+    @property
+    def awaiting_account_link(self) -> bool:
+        """Return whether a watch drop finished earning and must wait for linking."""
+        return (
+            not self.is_claimed
+            and self.is_watch_drop
+            and self._claim_completion_observed
+            and self.claim_requires_account_link
+        )
 
     @property
     def remaining_minutes(self) -> int:
@@ -341,6 +383,7 @@ class TimedDrop(BaseDrop):
         return (
             super()._base_earn_conditions()
             and self.is_watch_drop
+            and not self.awaiting_account_link
             # NOTE: This may be a bad idea, as it invalidates the can_earn status
             # and provides no way to recover from this state until the next reload.
             and self.extra_current_minutes < MAX_EXTRA_MINUTES
@@ -359,6 +402,19 @@ class TimedDrop(BaseDrop):
         self.extra_current_minutes = 0
         self._on_state_changed()
 
+    def defer_claim_until_account_link(self) -> None:
+        """Keep a claim-ready event as completion while waiting for the game account."""
+        if self.awaiting_account_link or not self.is_watch_drop:
+            return
+        # The claim event can arrive before the final minute update. Ordinary minute
+        # updates can apply sibling deltas and cannot establish claim readiness.
+        self._claim_completion_observed = True
+        self.campaign.progress_revision += 1
+        self.real_current_minutes = self.required_minutes
+        self.extra_current_minutes = 0
+        self._twitch.request_games_update()
+        self._on_state_changed()
+
     def _bump_minutes(self, channel: Channel | None) -> bool:
         if self.can_earn(channel):
             self.extra_current_minutes += 1
@@ -373,10 +429,18 @@ class TimedDrop(BaseDrop):
         if result:
             self.real_current_minutes = self.required_minutes
             self.extra_current_minutes = 0
-            if not was_claimed:
+            if not was_claimed and not self.quiet_claim:
                 self._twitch.drop_history.record(self, self.campaign)
         self._on_state_changed()
         return result
+
+    def record_grant(self, number: int) -> bool:
+        # A daily goal repeats under one drop ID, so each grant gets its own history entry.
+        return self._twitch.drop_history.record(self, self.campaign, f"{self.id}#{number}")
+
+    async def announce_grant(self, number: int) -> None:
+        """Notify about a reward Twitch has already granted."""
+        await self._announce_claim(f"#{number}")
 
     def display(self, *, countdown: bool = True, subone: bool = False) -> None:
         """Display this drop in the GUI with progress information."""

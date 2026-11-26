@@ -209,6 +209,16 @@ lang/                # Translation JSON files (20 languages)
   Keep confirmed bans and expiry callbacks across cache recovery until expiry or a
   confirmed null response. Cancel callbacks and clear account-owned ban state on
   identity replacement and shutdown.
+- Offline detection must not rely only on `stream-down`: a reconnect can lose the event
+  and full cleanup drops topics of channels missing from a game's top 20 directory results.
+  `ChannelService.refresh_watched_channel()` rechecks the watched channel in CHANNELS_FETCH
+  and keeps it tracked while online. A newer observation takes precedence over the earlier
+  discovery snapshot for that channel, preserving its campaign allowlist membership and
+  same-broadcast drop eligibility. A failed watch of the current stream calls `check_online()`.
+  `Channel.refresh_stream()` bounds both checks and preserves known state on an errored
+  response or timeout. A newer stream update invalidates older replies. Keep delayed
+  checks cancellable through the lookup and cancel them when retiring channel topics.
+  Regression: `tests/test_watched_channel_recovery.py`.
 
 **src/models/campaign.py** - Drop campaigns:
 
@@ -259,6 +269,10 @@ lang/                # Translation JSON files (20 languages)
 
 - REST API endpoints: `/api/status`, `/api/channels`, `/api/campaigns`, `/api/settings`, `/api/session`, `/api/session/finish`, `/api/session/retry`, `/api/session/logout`, `/api/session/vnc`, `/api/reload`, `/api/cache/clear`, `/api/close`, `/api/version`, `/api/history`, `/api/history/export.csv`, `/api/history/stats`
 - Socket.IO server for real-time bi-directional communication
+- The dashboard replaces its channel list on Socket.IO reconnect and batch updates.
+  Idle cleanup with no wanted games cancels retired channels' delayed online checks
+  before clearing the list. REST and reconnect snapshots derive the watching flag
+  from the manager's current watched channel ID.
 - Serves static web frontend from `web/` directory
 - Integrates with WebGUIManager via `set_managers()`
 - The Settings **Clear All Cache** action discards local campaign, channel, and other
@@ -374,6 +388,11 @@ lang/                # Translation JSON files (20 languages)
   Long additional reward names must wrap within the artwork row's information column
   rather than overflowing into the card's clipped area.
   Regression: `test_wanted_queue_frontend.py` and `test_wanted_items.py`.
+- The queue title's ⓘ button uses `aria-expanded` to control the ordering help.
+  `renderWantedOrderInfo()` describes the temporary order first, then the default saved
+  list, reward priority and fallback tiers. The temporary order can place a fallback
+  game first. Keep the text in step with `StreamSelector._get_wanted_game_tree()` and
+  the `gui.wanted.order_*` strings in every locale.
 - Mining list supports drag ordering and editable integer priority numbers. Clamp valid
   ranks to the list bounds; reject blank/fractional values without changing settings.
   Keep priority and remove-control labels translated and accessible. Regression tests in
@@ -405,6 +424,28 @@ lang/                # Translation JSON files (20 languages)
   change lines, language switching and broadcasts run only after a successful save.
   Regressions: `test_rejected_update_writes_prints_and_saves_nothing` and
   `test_failed_save_restores_every_field_and_defers_effects`.
+- Persist `mining_opt_ins_revision` atomically with the account-link override and
+  followed-channel option. Return both flags and the revision together. The dashboard
+  accepts complete non-stale snapshots so late POST or socket updates cannot revert
+  another tab's setting. Regressions live in `test_followed_channels*.py`.
+- `prefer_followed_channels` defaults false and accepts only booleans,
+  validated before any write; changes request a games update. When true,
+  `ChannelService.get_followed_live_channels(known_ids)` runs during CHANNELS_FETCH
+  under one 30-second bound: the raw `FOLLOWED_LIVE_QUERY` (`currentUser.followedLiveUsers`,
+  first 100, no pagination), batched stream info for channels not already tracked, and
+  a per-channel AvailableDrops check. Follow-only candidates require positive drop
+  evidence on discovery and later stream checks. The normal watched-stream refresh
+  and ban filtering still run. Apply the follow tie-break only between channels with
+  equal mining and ACL priority and equal sets of eligible (campaign ID, drop ID)
+  pairs. Keep the existing selection order between different reward sets. Manual
+  mode and a current hand-picked channel disable the tie-break. A manual reset,
+  stop, account reset or watching another channel ends hand-pick protection.
+  Failed follow or batch stream results leave the current follow set in place.
+  Failed individual drop checks skip unverified candidates. `ExitRequest` propagates,
+  and in-flight results are discarded after account reset or disabling the setting.
+  Raw GraphQL debugging is suppressed for the optional lookup and its child
+  requests. Tests: `test_followed_channels.py` and
+  `test_followed_channels_frontend.py`.
 - Drop-name ignore list (`drop_name_blacklist`), empty by default. Entries are literal,
   case-insensitive substrings entered one per line; whitespace and blanks are removed and
   duplicates are casefolded while preserving the first spelling/order.
@@ -423,6 +464,13 @@ lang/                # Translation JSON files (20 languages)
   timing, ACL/category, Mining list, prerequisites, claims, and ignore checks.
   Changes trigger game selection refresh. Keep the warning and save-failure feedback
   translated and safely rendered. Estimated minutes do not prove Twitch progress.
+- Automatic claims check Twitch's campaign link status independently of the mining
+  override. Only a nonempty drop containing exclusively badges/emotes can be claimed
+  while unlinked. Completed, link-deferred drops stay unclaimed in Inventory and leave
+  the Wanted Drops Queue. Their prerequisite dependents still require a successful
+  claim. A claim-ready websocket event preserves the claim ID and updates completion
+  without triggering post-claim polling, history or notifications. A later linked
+  inventory can claim the reward within the existing automatic-claim window.
 - Zero-minute subscription rewards are omitted from Inventory and Wanted Drops Queue;
   individually expired and non-mineable rewards are omitted from the queue without hiding
   upcoming or sequential rewards; successful claims refresh the queue immediately; the
@@ -495,6 +543,20 @@ lang/                # Translation JSON files (20 languages)
   mutation; restore the previous webhook on save failure. API validation errors must
   not echo submitted settings. Test Connection reports success only after saving.
   Preserve localized safe Help rendering and `tests/test_discord_*` coverage.
+- `notification_events` (`NotificationEventSettings`) selects alert events for both
+  providers: `drop_claimed` (default true) and `new_release` (default false). Only an
+  explicit `drop_claimed: false` suppresses claim alerts; settings problems never block a
+  claim. Partial updates merge; unknown keys or non-booleans fail before any write.
+  Persist the event revision with the choices so late settings responses or broadcasts
+  cannot overwrite newer choices in the dashboard.
+  `ReleaseService` (`src/services/release_service.py`) owns the GitHub latest-release
+  lookup for `/api/version` and the account-independent check task started in
+  `Twitch.run()` (startup, then every six hours). Read bodies through
+  `Diagnostics.read_bounded()`, compare versions numerically, link only to this
+  repository's matching release tag page, and persist each provider's highest
+  accepted version atomically in `last_notified_releases`. Provider failures retry
+  independently. Recheck the opt-in and provider settings after fetching from GitHub.
+  Keep delivery state in server settings only. Coverage: `tests/test_release_notifications.py`.
 - `tests/test_telegram_frontend.py`, `tests/test_telegram_api.py`, and
   `tests/test_telegram_integration.py` cover translated Help rendering, stored credentials,
   failed saves, disabling, all shared claim paths, and transport failures without sending
@@ -518,6 +580,19 @@ progress to an ignored drop while the miner intentionally targets another reward
 
 ### Authentication and integrated browser login
 
+- Current source builds prefer `LoginFirefox` when Firefox 143 or newer is available.
+  Check the version under the browser UID before opening the sign-in window. Alpine
+  Chromium can reject fresh Twitch login as unsupported. The image includes both:
+  Firefox handles manual sign-in, Chromium retains SDK issuance and renewal over a
+  private pipe on POSIX. Firefox runs with a private profile and password saving
+  disabled as `tdm-browser`.
+  Do not enable BiDi/Marionette during sign-in. Manual Finish/window close flushes
+  the profile before reopening it with loopback BiDi; validate both PID and profile
+  from `session.new` before reading cookies, then use the shared `FirefoxExporter`
+  and all existing account/catalog/server-issuance checks. Firefox requires manual
+  Finish; preserve Chromium's completion extension for the fallback path. Keep
+  profile/process/protocol cleanup cancellation-safe. Source hosts without a compatible
+  Firefox retain Chromium login. Regression: `tests/test_container_firefox.py`.
 - The temporary interactive Chromium profile disables password saving before startup.
   Its bundled completion extension observes only Twitch login-cookie presence, closes
   the owned profile's windows normally, and never exports cookie values. Treat this as
@@ -574,8 +649,8 @@ progress to an ignored drop while the miner intentionally targets another reward
   restore legacy cookies after explicit logout. Version 3 atomically persists a
   logged-out marker with cleared session/SDK state; successful login clears it.
 - `ContainerLogin` owns one temporary attempt with a 15-minute interactive timeout.
-  Launch ordinary Chromium at Twitch sign in without remote automation, close its
-  window normally to flush storage, then reopen the owned profile for CDP capture.
+  Launch the selected browser at Twitch sign in without remote automation, close its
+  window normally to flush storage, then reopen the owned profile for CDP/BiDi capture.
   Verify the browser PID before reading credentials. Finish sign in uses EWMH close;
   the window X works too. Profiles and all owned processes must be drained through
   cancellation, startup failures, timeout and shutdown. Never attach another profile.
@@ -588,6 +663,12 @@ progress to an ignored drop while the miner intentionally targets another reward
 - The renewal worker rotates SDK state, normally five minutes before expiry, with
   bounded retries and same-account/freshness validation. Mining GraphQL stays in
   Python. Preserve safe-read retry rules; never replay ambiguous mutations.
+- Resolve the current `SessionTransport` proxy at each `OwnedChromium` launch for
+  server SDK issuance and renewal. Accept one HTTP or HTTPS proxy endpoint and put
+  only its address in the browser arguments. Supply Basic credentials over the owned
+  browser control channel only for challenges from that proxy. Keep credentials out
+  of process arguments, diagnostics and the interactive browser. The embedded
+  sign-in browser and desktop helper follow their own network routes.
 - On POSIX, `OwnedChromium` (renewal/SDK issuance, run as root) uses
   `--remote-debugging-pipe` and never opens a DevTools TCP port: CDP has no
   authentication, and the `tdm-browser` login UID shares loopback. A small exec
@@ -621,7 +702,7 @@ progress to an ignored drop while the miner intentionally targets another reward
   closed on mounts that ignore chmod or give the browser ownership. Keep temporary
   display/profile directories owned by the browser UID. Root-only SDK profiles remain
   unreadable to it. Retain tests for file-access isolation and pre-login password setup.
-- Docker includes Chromium, Xvfb, openbox, x11vnc, xdotool, noVNC and timezone data.
+- Docker includes Firefox, Chromium, Xvfb, openbox, x11vnc, xdotool, noVNC and timezone data.
   Set `TZ` to the home internet connection’s timezone. Use init, shared memory and
   a cleanup grace period. Only the dashboard port is published. Display numbers are
   allocated by Xvfb to avoid stale fixed-display locks after engine restarts.
@@ -795,6 +876,85 @@ progress to an ignored drop while the miner intentionally targets another reward
   Playlist/transport, lifecycle, and controlled-clock regressions live in
   `tests/test_playlist_watch.py`, `tests/test_watch_transport.py`, and
   `tests/test_watch_poll_cadence.py`.
+- Since v2.7.0, a sitewide watch-based Open Reward Campaign maps one group to a drop in `RewardCampaign`.
+  An actionable `CLAIMABLE` group takes priority. Other started groups are ranked by availability: mineable now,
+  then waiting for the next window, then at the goal inside an open window; then unstarted
+  groups that can be mined, then finished ones (`CLAIMED`/`FULFILLED`). Twitch grants a reached goal and keeps it `IN_PROGRESS`, so it
+  counts as granted until its window ends. Groups that also need a subscription goal
+  (`subsGoal`) are skipped. Window ends and badge rewards come from `REWARD_HINTS_QUERY`
+  (optional, separate so a rejected field only loses the hints): a reward Twitch reports as
+  a badge gets `BADGE`, otherwise it stays `UNKNOWN` ("Other reward"), so the Reward types
+  filter applies. A disabled reward type cannot make a flagless stream watchable.
+  Missing artwork preserves the benefit's name and type in Inventory and its filters.
+  Ignore keywords match the campaign title and each reward name independently.
+  The claim ID uses the in-progress campaign's ID when Twitch lists one.
+  Progress and campaign discovery share one request. Debug logs report aggregate counts.
+  Keep account-specific reward responses out of raw GraphQL logs on both reloads and ticks.
+  On the progress tick, `InventoryService.refresh_reward_progress` reads all earnable reward
+  campaigns with one query; `get_active_campaign(exclude_rewards=True)` then keeps the
+  CurrentDrop query for regular campaigns. A goal reached inside a known window (or with an
+  unknown window end) reloads the inventory once, and a `CLAIMABLE` reading reloads it until
+  the drop has a claim id. A confirmed claim triggers lane reselection. A claim with an
+  uncertain outcome waits for evidence of a new earning cycle before another attempt.
+  After the stored window
+  end (`window_end`) Twitch keeps the old at-goal reading until the next window starts: that
+  is stale, so it counts as no new minutes and does not reload; a `grantCount` rise reloads
+  only at the goal. Twitch resetting 60 -> 1 at a new window was observed live. After the
+  final grant, observed once on a sitewide campaign, Twitch dropped the campaign from the
+  in-progress list (every reading missing) and listed it in `completedRewardCampaigns` with
+  status `COMPLETED` (`REWARD_COMPLETED_QUERY`, optional like the hints). A campaign listed
+  there with status `COMPLETED` is built and then dropped from the load, unless the picked
+  group has a real reading that can be mined or claimed now
+  (`RewardCampaign.earnable_from_reading`); a failed or unusable list drops nothing. The tick
+  path does not read the list, so a final grant mid-session stops mining from the next
+  reload on, once Twitch lists the campaign. A stale reading that reaches the extra-minute cutoff is
+  remembered per group (`RewardLedger.stale`) so a rebuild with the same reading counts the
+  group as done, until the reading changes (a missing window from a failed hints query is
+  ignored in that comparison). A below-goal or missing reading that stays unchanged to the
+  extra-minute cutoff (Twitch is not crediting the group) is remembered in
+  `RewardLedger.uncredited` as (signature, until, held). The first cutoff stores a pending
+  entry (not held, until 6 hours ahead) and the next reload mines the group again; a second
+  cutoff with the same reading makes it a hold, with until at most `UNCREDITED_RETRY` (6
+  hours) ahead and never later than the last start that can still finish before the campaign
+  ends, with one cutoff of slack. A rebuild with that reading holds the group until then, or
+  until the reading changes (a missing window is ignored either way), and does not show it
+  as claimed. An entry past its until is dropped, pending ones too. On a rebuild, a missing
+  reading keeps an entry recorded from a real one; the ticks of a campaign built without a
+  reading replace a pending entry (one extra cycle before the hold). Only a mineable state is held: granted, unfinishable
+  and waiting-window states stay as they were. A held group that has no reading keeps its
+  lane (rank 3), so the campaign does not cycle through every unstarted lane. A missing
+  reading on a tick records nothing for a campaign built from a real reading. Recording
+  happens only in the two no-credit bump paths, never for `CLAIMABLE` or the error fallback.
+  `InventoryService.clear_cached_state` resets the whole ledger in place (logout, account
+  change, Clear All Cache); the next load reseeds `announced` from the current grant counts.
+  Validate each reward campaign before replacing regular inventory. A malformed lane only
+  excludes that lane. Measure available watch time from the latest of now, campaign start
+  and the next available window. A goal that cannot finish before the campaign ends is
+  unmineable (`RewardCampaign.mineable_drop_ids`; start time at `endsAt`) but not shown as
+  claimed. Groups whose categories or rewards are malformed (a category without an int-like
+  ID or a name, a reward without ID or name, a non-dict `thumbnailImage`) are skipped, not
+  the campaign. A reward drop's claim is quiet (`quiet_claim`):
+  it prints, notifies and records nothing itself. Every announcement (print with the grant
+  number, notifications, history entry `<dropid>#<grantCount>`, `announce_new_grants`) comes
+  from a `grantCount` rise. Announced counts live per group in
+  `InventoryService._reward_ledger` (`RewardLedger`), so reloads and failed loads keep them.
+  A group's first sighting with a real reading (`grantCount` an int) starts at its current
+  count; a missing group or reading leaves the ledger untouched at load. A group not in
+  progress at load is seeded by the first tick reading below its goal, so its first grant is
+  announced; a first reading already at the goal (restart) is not. A claim that Twitch does not
+  count in `grantCount` is not announced (claims were never seen live). Preserve confirmed
+  increases when a campaign leaves Inventory or switches lanes. Keep pending grants on
+  reload, clear them on account change, and never repeat a notification of uncertain outcome.
+  Announcement errors log a fixed warning. This relies on `grantCount` rising when the goal is reached (the live
+  run saw 0 -> 1 at 60/60).
+  A reading without
+  a minute increase bumps the estimate until the extra-minute cutoff switches channels. Reward
+  categories also add live channels without the drops flag in CHANNELS_FETCH. A failed
+  optional directory lookup preserves regular channels already found. Recheck the watched
+  broadcast before applying each reward reading after an awaited notification.
+  Inventory shows Twitch's `grantCount` as "Times earned" (`reward_grants`; no total is available).
+  Regression coverage: `tests/test_reward_campaigns.py`, `tests/test_reward_channel_choice.py`
+  and `tests/test_reward_grants_frontend.py`.
 
 ### GraphQL Operations
 
@@ -810,13 +970,20 @@ Persisted operations are defined in `src/config/operations.py` as `GQL_OPERATION
 - **AvailableDrops** - Check which campaigns a channel qualifies for (badge validation)
 - **NotificationsDelete** - Delete Twitch notifications
 
+Open Reward Campaigns use four raw `GQLRawQuery` operations, `REWARD_CAMPAIGNS_QUERY`,
+`REWARD_PROGRESS_QUERY`, `REWARD_HINTS_QUERY` (optional window and badge hints) and
+`REWARD_COMPLETED_QUERY` (optional completed list); the two optional ones run concurrently,
+each with its own 5 s timeout. They have no persisted hashes.
+
 ### Channel Selection Priority
 
 1. Selected channel (if user clicked one)
 2. ACL-based channels over directory channels
 3. Game priority order (from settings)
-4. Viewer count (descending)
-5. Maximum 199 channels tracked simultaneously
+4. More wanted campaigns progressable on the channel, at equal priority and ACL status
+   (`ChannelService.get_selection_priority()`, also used by `should_switch()`)
+5. Viewer count (descending)
+6. Maximum 199 channels tracked simultaneously
 
 ### Maintenance Task
 
@@ -1035,8 +1202,9 @@ protocol rejection; preserve rejection and target-cleanup assertions.
   `uv`, update `src/version.py`, `pyproject.toml`, and `uv.lock` together, and validate all
   three before creating a release branch or tag. Release notes read `GEMINI_API_KEY`
   from the step environment and send it as a header, never as an argument or URL.
-  Preserve existing data-volume/session migration instructions. Prepare versioned
-  frontend cache keys through the authorized release workflow before deployment.
+  Keep data preservation and session recovery instructions in the current installation
+  and authentication guides. Prepare versioned frontend cache keys through the
+  authorized release workflow before deployment.
   Keep current Docker/helper examples and Settings-tab paths aligned in release
   documentation. Distinguish historical release behavior from current features and
   disclose host-name migration requirements without claiming live Twitch acceptance.
@@ -1131,6 +1299,11 @@ The application uses a web-based interface accessible via browser:
 - Installs dependencies from `pyproject.toml`, then removes installed pip and its vendored
   modules; Python's bundled `ensurepip` bootstrap wheel remains. Dependency changes
   require rebuilding the image.
+- Runs under `tini` as its entrypoint so orphans such as browser helpers are reaped
+  even without Docker's `--init`. Python must not become PID 1: it never reaps orphans,
+  and the zombies eventually exhaust the container's task limit (issue #212). Keep the
+  HEALTHCHECK in exec form so a timeout kills the probe rather than orphaning it.
+  Regression: `tests/test_dockerfile_init.py`.
 - Exposes port 8080
 - Health check on the public `/healthz` endpoint
 

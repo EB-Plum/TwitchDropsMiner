@@ -1,6 +1,7 @@
 """Real task ownership boundaries drain old-account work before replacement."""
 
 import asyncio
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -80,6 +81,7 @@ async def test_cancelled_fanout_drains_children_and_releases_provider_lock(tmp_p
         if stage == "campaigns":
             service.fetch_campaigns = blocked
         else:
+            service.fetch_reward_campaigns = AsyncMock(return_value=[])
             service.fetch_campaigns = AsyncMock(return_value={"one": data})
             monkeypatch.setattr("src.services.inventory_service.DropsCampaign", lambda *args: SimpleNamespace(
                 id="one", active=True, upcoming=False, ends_at=1, eligible=True,
@@ -151,16 +153,15 @@ async def test_authentication_change_drains_inflight_channel_online_check(tmp_pa
     channel = Channel(client, id=17, login="old-channel")
     client.channels[channel.id] = channel
 
-    async def online_delay(self):
-        # Production clears the pending display marker before its network call.
-        self._pending_stream_up = None
+    async def delayed_stream(_operation):
         entered.set()
         try:
             await asyncio.Event().wait()
         finally:
             cleaned.set()
 
-    monkeypatch.setattr(Channel, "_online_delay", online_delay)
+    monkeypatch.setattr("src.models.channel.ONLINE_DELAY", timedelta(0))
+    client.gql_request = delayed_stream
     channel.check_online()
     task = channel._pending_stream_up
     await entered.wait()

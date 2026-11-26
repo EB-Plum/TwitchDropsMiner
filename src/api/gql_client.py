@@ -8,14 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from itertools import chain
 from typing import TYPE_CHECKING, overload
 
+from src.config.constants import GQLOperation
 from src.exceptions import GQLException, MinerException
 from src.utils import ExponentialBackoff, RateLimiter
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from src.api.http_client import HTTPClient
     from src.auth import _AuthState
     from src.config import ClientInfo, GQLRequest, JsonType
@@ -23,6 +28,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("TwitchDrops")
 gql_logger = logging.getLogger("TwitchDrops.gql")
+_private_discovery = ContextVar("private_gql_discovery", default=False)
+
+
+@contextmanager
+def private_gql_discovery() -> Iterator[None]:
+    """Suppress raw GraphQL logging for an account-specific discovery task and its children."""
+    token = _private_discovery.set(True)
+    try:
+        yield
+    finally:
+        _private_discovery.reset(token)
 
 
 class GQLClient:
@@ -89,7 +105,13 @@ class GQLClient:
         RuntimeError
             If the retry loop is broken unexpectedly
         """
-        gql_logger.debug(f"GQL Request: {ops}")
+        single_attempt = any(
+            isinstance(op, GQLOperation) and op.single_attempt
+            for op in (ops if isinstance(ops, list) else [ops])
+        )
+        private = _private_discovery.get() or single_attempt
+        if not private:
+            gql_logger.debug("GQL Request: %s", ops)
         backoff = ExponentialBackoff(maximum=60)
         # Flag to retry the request once for specific errors
         single_retry: bool = True
@@ -101,21 +123,32 @@ class GQLClient:
                 if auth_state.browser_active is True:
                     browser = auth_state._twitch._browser
                     assert browser is not None
-                    response_json = await browser.gql(ops)
+                    if single_attempt:
+                        response_json = await browser.gql(ops, single_attempt=True)
+                    else:
+                        response_json = await browser.gql(ops)
                 else:
                     async with self.http_client.request(
                         "POST",
                         "https://gql.twitch.tv/gql",
                         json=ops,
+                        single_attempt=single_attempt,
                         headers=auth_state.headers(user_agent=self._client_type.USER_AGENT, gql=True),
                     ) as response:
                         response_json = await response.json()
 
-            gql_logger.debug(f"GQL Response: {response_json}")
+            if not private:
+                gql_logger.debug("GQL Response: %s", response_json)
             orig_response = response_json
 
             # Normalize to list for unified error handling
             response_list = response_json if isinstance(response_json, list) else [response_json]
+
+            if single_attempt:
+                if any(not isinstance(row, dict) or row.get("errors") or row.get("error")
+                       for row in response_list):
+                    raise GQLException("Mutation response was not confirmed")
+                return orig_response
 
             force_retry: bool = False
             for response_json in response_list:
@@ -127,10 +160,13 @@ class GQLClient:
                                 "service error",
                                 "PersistedQueryNotFound",
                             ):
-                                logger.error(
-                                    f"Retrying a {error_dict['message']} for "
-                                    f"{response_json['extensions']['operationName']}"
-                                )
+                                if private:
+                                    logger.debug("Retrying account-specific discovery request")
+                                else:
+                                    logger.error(
+                                        f"Retrying a {error_dict['message']} for "
+                                        f"{response_json['extensions']['operationName']}"
+                                    )
                                 single_retry = False
                                 if delay < 5:
                                     # Overwrite delay if too short

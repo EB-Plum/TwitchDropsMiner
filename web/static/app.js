@@ -210,12 +210,9 @@ socket.on('initial_state', (data) => {
     console.log('Received initial state', data);
     if (data.status) updateStatus(data.status);
 
-    // Batch update channels to prevent UI freezing
+    // Reconnect state is a complete snapshot, including an empty channel list.
     if (data.channels) {
-        data.channels.forEach(ch => {
-            state.channels[ch.id] = ch;
-        });
-        renderChannels();
+        replaceChannels(data.channels);
     }
 
     // Batch update campaigns to prevent UI freezing
@@ -286,12 +283,7 @@ socket.on('channels_clear', () => {
 });
 
 socket.on('channels_batch_update', (data) => {
-    // Replace all channels atomically to prevent flickering
-    state.channels = {};
-    data.channels.forEach(ch => {
-        state.channels[ch.id] = ch;
-    });
-    renderChannels();
+    replaceChannels(data.channels);
 });
 
 socket.on('channel_watching', (data) => {
@@ -433,9 +425,13 @@ function removeChannel(channelId) {
     renderChannels();
 }
 
-function clearChannels() {
-    state.channels = {};
+function replaceChannels(channels) {
+    state.channels = Object.fromEntries(channels.map(channel => [channel.id, channel]));
     renderChannels();
+}
+
+function clearChannels() {
+    replaceChannels([]);
 }
 
 function setWatchingChannel(channelId) {
@@ -1257,7 +1253,9 @@ function renderInventory() {
                 drop.benefits.forEach(benefit => {
                     benefitsList.appendChild(
                         makeElement('div', { class: 'benefit-item' }, '', el => {
-                            el.appendChild(makeImageElement(benefit.image_url, benefit.name, 'benefit-icon'));
+                            if (benefit.image_url) {
+                                el.appendChild(makeImageElement(benefit.image_url, benefit.name, 'benefit-icon'));
+                            }
                             el.appendChild(makeElement('div', { class: 'benefit-info' }, '', el2 => {
                                 el2.appendChild(makeElement('span', { class: 'benefit-name' }, benefit.name));
                                 const labels = t.gui?.inventory?.filters || {};
@@ -1272,6 +1270,11 @@ function renderInventory() {
             dropItem.appendChild(benefitsList);
             dropItem.appendChild(makeDropProgressBar(drop));
             dropItem.appendChild(makeElement('div', {}, `${drop.current_minutes} / ${drop.required_minutes} minutes (${dropPercent(drop)}%)`));
+            if (Number.isInteger(drop.reward_grants)) {
+                const grantsTemplate = t.gui?.inventory?.reward_grants || 'Times earned: {count}';
+                dropItem.appendChild(makeElement('div', { class: 'drop-reward-grants' },
+                    grantsTemplate.replace('{count}', String(drop.reward_grants))));
+            }
             if (drop.is_claimed) {
                 dropItem.appendChild(makeElement('div', {}, `✓ ${claimedText}`));
             } else if (policyStatus) {
@@ -1416,6 +1419,46 @@ function updateLoginStatus(data) {
     globalThis.browserLoginPanel?.updateLogin(data);
 }
 
+function reconcileNotificationEvents(settings) {
+    // A full settings update or POST response can arrive after a newer save.
+    const revision = state.settings.notification_events_revision ?? -1;
+    if ((settings.notification_events_revision ?? -1) < revision) {
+        return {
+            ...settings,
+            notification_events: state.settings.notification_events,
+            notification_events_revision: revision,
+        };
+    }
+    return settings;
+}
+
+function renderNotificationEvents() {
+    const events = state.settings.notification_events;
+    const drop = document.getElementById('notify-drop_claimed');
+    const release = document.getElementById('notify-new_release');
+    if (drop && !drop.disabled) drop.checked = events?.drop_claimed !== false;
+    if (release && !release.disabled) release.checked = events?.new_release === true;
+}
+
+function reconcileMiningOptIns(settings, authoritative, changedFields) {
+    const revision = state.settings.mining_opt_ins_revision ?? -1;
+    const incoming = settings.mining_opt_ins_revision;
+    const keys = ['allow_unlinked_campaigns', 'prefer_followed_channels'];
+    if (Number.isSafeInteger(incoming) && incoming >= 0 && incoming >= revision
+        && keys.every(key => typeof settings[key] === 'boolean')) {
+        return settings;
+    }
+    const next = {...settings, mining_opt_ins_revision: state.settings.mining_opt_ins_revision};
+    for (const key of keys) {
+        // Older servers did not attach a revision. Trust only their explicit writes
+        // and complete settings updates until a versioned snapshot arrives.
+        const acceptLegacy = revision < 0 && incoming === undefined
+            && (authoritative || changedFields.includes(key)) && typeof settings[key] === 'boolean';
+        if (!acceptLegacy) next[key] = state.settings[key];
+    }
+    return next;
+}
+
 function updateSettingsUI(settings, authoritative = false, changedFields = []) {
     // Initial loads/socket updates own the watch list; unrelated partial-save replies do not.
     if (!authoritative && Array.isArray(state.settings.games_to_watch)) {
@@ -1431,9 +1474,13 @@ function updateSettingsUI(settings, authoritative = false, changedFields = []) {
     if (!authoritative && !changedFields.includes('mining_benefits') && state.settings.mining_benefits) {
         settings = {...settings, mining_benefits: state.settings.mining_benefits};
     }
-    state.settings = settings;
+    settings = reconcileMiningOptIns(settings, authoritative, changedFields);
+    state.settings = reconcileNotificationEvents(settings);
     const allowUnlinked = document.getElementById('allow-unlinked-campaigns');
-    if (allowUnlinked) allowUnlinked.checked = settings.allow_unlinked_campaigns === true;
+    if (allowUnlinked && !allowUnlinked.disabled) allowUnlinked.checked = settings.allow_unlinked_campaigns === true;
+    const preferFollowed = document.getElementById('prefer-followed-channels');
+    if (preferFollowed && !preferFollowed.disabled) preferFollowed.checked = settings.prefer_followed_channels === true;
+    renderNotificationEvents();
     document.getElementById('dark-mode').checked = settings.dark_mode || false;
     document.getElementById('priority-list-only').checked = settings.priority_list_only !== false;
     applyInventoryViewMode(settings.inventory_list_view || false);
@@ -1537,6 +1584,7 @@ function updateSettingsUI(settings, authoritative = false, changedFields = []) {
 
     // Re-render inventory to apply filters
     renderInventory();
+    renderWantedOrderInfo();
 }
 
 function updateManualModeUI(manualModeInfo) {
@@ -2658,12 +2706,11 @@ async function onPriorityModeChange() {
     }
 }
 
-async function onUnlinkedMiningChange() {
-    const input = document.getElementById('allow-unlinked-campaigns');
-    const error = document.getElementById('allow-unlinked-error');
+// Save one opt-in checkbox alone; a failure restores the confirmed value and shows `message`.
+async function saveBooleanSetting(key, inputId, errorId, message) {
+    const input = document.getElementById(inputId);
+    const error = document.getElementById(errorId);
     const requested = input.checked;
-    const message = state.translations.gui?.settings?.allow_unlinked_campaigns_save_error ||
-        'Could not save the account-link mining option. Please try again.';
     input.disabled = true;
     error.hidden = true;
     error.textContent = '';
@@ -2671,18 +2718,69 @@ async function onUnlinkedMiningChange() {
         const response = await fetch('/api/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ allow_unlinked_campaigns: requested })
+            body: JSON.stringify({ [key]: requested })
         });
         if (!response.ok) throw new Error(message);
         const data = await response.json();
-        if (data.success !== true || data.settings?.allow_unlinked_campaigns !== requested) throw new Error(message);
-        updateSettingsUI(data.settings);
+        if (data.success !== true || data.settings?.[key] !== requested) throw new Error(message);
+        updateSettingsUI({
+            ...state.settings,
+            allow_unlinked_campaigns: data.settings.allow_unlinked_campaigns,
+            prefer_followed_channels: data.settings.prefer_followed_channels,
+            mining_opt_ins_revision: data.settings.mining_opt_ins_revision,
+        }, false, [key]);
     } catch (failure) {
-        input.checked = state.settings.allow_unlinked_campaigns === true;
         reportSettingsError(error, message);
         error.hidden = false;
     } finally {
         input.disabled = false;
+        input.checked = state.settings[key] === true;
+    }
+}
+
+function onUnlinkedMiningChange() {
+    return saveBooleanSetting('allow_unlinked_campaigns', 'allow-unlinked-campaigns', 'allow-unlinked-error',
+        state.translations.gui?.settings?.allow_unlinked_campaigns_save_error ||
+        'Could not save the account-link mining option. Please try again.');
+}
+
+function onPreferFollowedChange() {
+    return saveBooleanSetting('prefer_followed_channels', 'prefer-followed-channels', 'prefer-followed-error',
+        state.translations.gui?.settings?.prefer_followed_channels_save_error ||
+        'Could not save the followed channels option. Please try again.');
+}
+
+async function onNotificationEventChange(event) {
+    const input = event.target;
+    const requested = input.checked;
+    const error = document.getElementById('notification-events-error');
+    const message = state.translations.gui?.settings?.notification_events?.save_error ||
+        'Could not save notification choices. Please try again.';
+    input.disabled = true;
+    error.hidden = true;
+    error.textContent = '';
+    try {
+        const response = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ notification_events: { [input.value]: requested } })
+        });
+        if (!response.ok) throw new Error(message);
+        const data = await response.json();
+        if (data.success !== true || data.settings?.notification_events?.[input.value] !== requested) {
+            throw new Error(message);
+        }
+        state.settings = reconcileNotificationEvents({
+            ...state.settings,
+            notification_events: data.settings.notification_events,
+            notification_events_revision: data.settings.notification_events_revision,
+        });
+    } catch (failure) {
+        reportSettingsError(error, message);
+        error.hidden = false;
+    } finally {
+        input.disabled = false;
+        renderNotificationEvents();
     }
 }
 
@@ -2820,6 +2918,12 @@ function applyTranslations(t) {
         if (allowUnlinkedWarning) allowUnlinkedWarning.textContent = t.gui.settings.allow_unlinked_campaigns_warning;
         const allowUnlinkedError = document.getElementById('allow-unlinked-error');
         if (allowUnlinkedError && !allowUnlinkedError.hidden) allowUnlinkedError.textContent = t.gui.settings.allow_unlinked_campaigns_save_error;
+        const preferFollowedLabel = document.getElementById('prefer-followed-label');
+        if (preferFollowedLabel) preferFollowedLabel.textContent = t.gui.settings.prefer_followed_channels;
+        const preferFollowedHelp = document.getElementById('prefer-followed-help');
+        if (preferFollowedHelp) preferFollowedHelp.textContent = t.gui.settings.prefer_followed_channels_help;
+        const preferFollowedError = document.getElementById('prefer-followed-error');
+        if (preferFollowedError && !preferFollowedError.hidden) preferFollowedError.textContent = t.gui.settings.prefer_followed_channels_save_error;
         if (typeof renderRewardPriority === 'function') renderRewardPriority();
 
         const dropBlacklistHeader = document.getElementById('settings-drop-blacklist-header');
@@ -2922,6 +3026,18 @@ function applyTranslations(t) {
         for (const id of ['inventory-reload-label', 'games-reload-label']) {
             const label = document.getElementById(id);
             if (label) label.textContent = t.gui.settings.reload_campaigns;
+        }
+
+        const eventsTrans = t.gui?.settings?.notification_events;
+        if (eventsTrans) {
+            const labels = {
+                'settings-notification-events-header': 'header', 'settings-notification-events-help': 'help',
+                'settings-notify-drop-claimed-label': 'drop_claimed', 'settings-notify-new-release-label': 'new_release'
+            };
+            for (const [id, key] of Object.entries(labels)) {
+                const element = document.getElementById(id);
+                if (element) element.textContent = eventsTrans[key];
+            }
         }
 
         const discordTrans = t.gui?.settings?.discord;
@@ -3355,9 +3471,13 @@ document.addEventListener('DOMContentLoaded', () => {
         .forEach(id => document.getElementById(id).addEventListener('change', onMiningHoursChange));
     document.getElementById('drop-name-blacklist').addEventListener('change', saveSettings);
     document.getElementById('allow-unlinked-campaigns').addEventListener('change', onUnlinkedMiningChange);
+    document.getElementById('prefer-followed-channels').addEventListener('change', onPreferFollowedChange);
+    document.querySelectorAll('.notification-event')
+        .forEach(input => input.addEventListener('change', onNotificationEventChange));
     // Proxy uses a manual "Set Proxy" button instead of auto-save
     document.getElementById('set-proxy-btn').addEventListener('click', saveProxy);
     document.getElementById('wanted-order-reset')?.addEventListener('click', () => saveWantedOrder([]));
+    document.getElementById('wanted-order-info-btn')?.addEventListener('click', toggleWantedOrderInfo);
     document.getElementById('verify-proxy-btn').addEventListener('click', verifyProxy);
     document.getElementById('test-discord-btn').addEventListener('click', () => updateDiscordSettings('test'));
     document.getElementById('save-discord-btn').addEventListener('click', () => updateDiscordSettings('save'));
@@ -3485,6 +3605,40 @@ function updateGameOrder(info) {
         reset.hidden = !gameOrder.active;
         reset.disabled = wantedOrderBusy;
     }
+    renderWantedOrderInfo();
+}
+
+// The ⓘ panel names the rules the server sorts the queue by (stream_selector.py).
+function renderWantedOrderInfo() {
+    const button = document.getElementById('wanted-order-info-btn');
+    const panel = document.getElementById('wanted-order-info');
+    if (button) {
+        const label = wantedText('order_info', 'Why is the queue in this order?');
+        button.title = label;
+        button.setAttribute('aria-label', label);
+    }
+    if (!panel) return;
+    const settings = state.settings || {};
+    const lines = [];
+    if (gameOrder.active) {
+        lines.push(wantedText('order_temporary', 'Games in the temporary order come first. Other games use the rules below.'));
+    }
+    lines.push(Array.isArray(settings.reward_priority) && settings.reward_priority.length
+        ? wantedText('order_reward_types', 'Games in your Mining list are sorted by reward type, then by the earliest deadline for that type, then by saved list order. Change this in Settings → Mining → Reward types.')
+        : wantedText('order_mining_list', 'Games in your Mining list follow its saved order.'));
+    if (settings.priority_list_only === false) {
+        lines.push(wantedText('order_fallback', 'Other eligible games are placed after Mining list games in the default order.'));
+    }
+    panel.replaceChildren(...lines.map(text => makeElement('p', {}, text)));
+}
+
+function toggleWantedOrderInfo() {
+    const button = document.getElementById('wanted-order-info-btn');
+    const panel = document.getElementById('wanted-order-info');
+    if (!button || !panel) return;
+    panel.hidden = !panel.hidden;
+    button.setAttribute('aria-expanded', String(!panel.hidden));
+    renderWantedOrderInfo();
 }
 
 function setWantedOrderError(visible) {

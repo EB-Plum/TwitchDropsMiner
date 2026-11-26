@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Twitch Drops Miner</title>
-    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <link rel="icon" type="image/png" href="/static/favicon.png?v=__APP_VERSION__">
     <link rel="stylesheet" href="/static/styles.css?v=__APP_VERSION__">
     <link rel="stylesheet" href="/static/auth.css?v=__APP_VERSION__">
     <script src="/static/auth.js?v=__APP_VERSION__"></script>
@@ -63,7 +63,7 @@
         <header>
             <div class="header-top">
                 <h1>
-                    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01"/><path d="M17.3 5H6.7a4 4 0 0 0-3.9 3.1l-1.5 7A2.7 2.7 0 0 0 4 18.3c.8 0 1.5-.4 2-1l1.4-2c.4-.6 1-.9 1.7-.9h5.8c.7 0 1.3.3 1.7.9l1.4 2c.5.6 1.2 1 2 1a2.7 2.7 0 0 0 2.7-3.2l-1.5-7A4 4 0 0 0 17.3 5Z"/></svg>
+                    <img class="brand-icon" src="/static/logo.svg?v=__APP_VERSION__" alt="" width="40" height="40">
                     <span>Twitch Drops Miner</span>
                 </h1>
                 <nav class="tabs">
@@ -174,7 +174,13 @@
 
                 <!-- Wanted Items (New Panel) -->
                 <section class="panel wanted-panel">
-                    <h2 id="wanted-header">Wanted Drop Queue</h2>
+                    <div class="wanted-queue-heading">
+                        <h2 id="wanted-header">Wanted Drop Queue</h2>
+                        <button type="button" id="wanted-order-info-btn" class="wanted-info-btn"
+                                aria-label="Why is the queue in this order?"
+                                aria-expanded="false" aria-controls="wanted-order-info">ⓘ</button>
+                    </div>
+                    <div id="wanted-order-info" class="wanted-order-info" hidden></div>
                     <div class="wanted-order-bar">
                         <span id="wanted-order-note" class="wanted-order-note"></span>
                         <button type="button" id="wanted-order-reset" class="small-btn" hidden></button>
@@ -350,6 +356,14 @@
 
                     </section>
                     <section class="settings-section">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="prefer-followed-channels" aria-describedby="prefer-followed-help" />
+                            <span id="prefer-followed-label">Prefer channels I follow</span>
+                        </label>
+                        <p id="prefer-followed-help" class="help-text">Prefer channels you follow on Twitch when live channels have the same priority and offer the same drops.</p>
+                        <p id="prefer-followed-error" class="help-text" role="alert" hidden></p>
+                    </section>
+                    <section class="settings-section">
                         <h2 id="settings-drop-blacklist-header">Ignored Drop Keywords</h2>
                         <p id="settings-drop-blacklist-help" class="help-text">Enter one keyword per line. Matching
                             drops and their dependent branches will not be mined.</p>
@@ -398,6 +412,19 @@
                     </section>
                 </div>
                 <div id="settings-panel-notifications" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-notifications" hidden>
+                    <section class="settings-section" role="group" aria-labelledby="settings-notification-events-header" aria-describedby="settings-notification-events-help">
+                        <h2 id="settings-notification-events-header">Notify me about</h2>
+                        <p id="settings-notification-events-help" class="help-text">Applies to Discord and Telegram, once either is set up below.</p>
+                        <label class="checkbox-label">
+                            <input type="checkbox" class="notification-event" id="notify-drop_claimed" value="drop_claimed" checked>
+                            <span id="settings-notify-drop-claimed-label">Claimed drops</span>
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" class="notification-event" id="notify-new_release" value="new_release">
+                            <span id="settings-notify-new-release-label">New TwitchDropsMiner versions (checked every 6 hours)</span>
+                        </label>
+                        <p id="notification-events-error" class="help-text" role="alert" hidden></p>
+                    </section>
                     <section class="settings-section">
                         <h2 id="settings-discord-header">Discord Notifications</h2>
                         <p id="settings-discord-help" class="help-text">Configure drop claim notifications on Discord.</p>

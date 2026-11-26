@@ -1,3 +1,75 @@
+# Release Notes - v2.7.1
+
+This patch fixes embedded Twitch sign-in and makes server-side session verification and renewal use the configured proxy.
+
+- **Embedded sign-in:** TDM prefers Firefox 143 or newer and falls back to Chromium when compatible Firefox is unavailable. After Twitch confirms sign-in in Firefox, select **Finish sign in** or close the embedded browser window. ([#235](https://github.com/rangermix/TwitchDropsMiner/pull/235))
+- **Proxy support:** The server-side Chromium browser now uses the HTTP or HTTPS proxy saved in **Settings → General** for token verification and renewal, including proxies that require Basic authentication. Embedded sign-in still follows the container's network. CI and a local authenticated proxy smoke test passed; live Twitch sign-in and renewal through a proxy were not verified. ([#231](https://github.com/rangermix/TwitchDropsMiner/pull/231))
+- **Documentation:** The README now includes an updated project logo and light and dark dashboard screenshots. ([#229](https://github.com/rangermix/TwitchDropsMiner/pull/229))
+
+To update, follow the [installation and update guide](https://github.com/rangermix/TwitchDropsMiner/wiki/Installation) and keep your existing data mount so your settings and valid sessions are preserved.
+
+# Release Notes - v2.7.0
+
+TDM now supports watch-based sitewide Open Reward Campaigns, including the daily
+GTA DVD Chest from the GTAVI Launch Celebration.
+
+- Add the campaign’s category to **Settings → Games → Mining list** and enable its
+  reward type. For the GTA DVD Chest, select **Grand Theft Auto VI** and **Other reward**.
+- Inventory shows **Times earned** for repeat rewards. Daily goals wait for the next
+  eligible window. Each newly observed grant gets its own history entry and can
+  trigger your configured claim alerts.
+- If Twitch leaves watch progress unchanged through two 15-minute attempts, TDM
+  pauses that goal for up to six hours so other selected games can progress.
+- Rewards without artwork keep their names and types in Inventory and its filters.
+
+Support covers watch goals on sitewide campaigns. Subscription goals and
+game-specific Open Reward Campaigns are outside this release’s scope.
+
+# Release Notes - v2.6.0
+
+This release adds an optional preference for channels you follow, new-version
+notifications, and an explanation of the Wanted Drops Queue order. It also fixes
+missed channel switches, repeated claim notifications, and Docker process buildup.
+
+## Mining and the dashboard
+
+- In **Settings → Mining**, enable **Prefer channels I follow** to favour a followed
+  channel when the candidates have the same priority and offer the same eligible
+  drops. TDM checks up to 100 live followed channels, including streams outside
+  the game directory's top results. The option is off by default.
+- Select **ⓘ** next to the **Wanted Drops Queue** to see how the temporary order,
+  saved Mining list, reward priorities, and fallback games affect the queue.
+- TDM rechecks the current channel when it refreshes channels or a watch request
+  fails. If a stream has ended, the miner can switch even when it missed the Twitch
+  offline event. Reconnecting to the dashboard refreshes the full channel list and
+  clears a stale **Now Watching** card when no channel is being watched.
+
+## Notifications and claims
+
+- **Settings → Notifications** has separate choices for claimed drops and new
+  releases. Claim alerts stay on by default. Release alerts are off by default.
+  When enabled and a provider is configured, TDM checks at startup and every
+  six hours. Discord and Telegram track successful deliveries separately, so one
+  provider can retry without repeating a notification already sent by the other.
+- TDM keeps completed unlinked game rewards in Inventory while waiting for
+  Twitch to report the account link. During that time it removes the completed
+  reward from the mining queue and skips the claim and its notification.
+  Drops containing only badges or emotes can still be claimed without linking.
+
+## Docker and updating
+
+- The Docker image runs a built-in init process and invokes its health probe
+  directly. This prevents timed-out probes from leaving behind zombie processes
+  and exhausting the container's process limit.
+- Follow the [installation and update guide](https://github.com/rangermix/TwitchDropsMiner/wiki/Installation)
+  to recreate the container with the same data mount, any log mount, timezone,
+  and custom runtime options. Keep the data directory to reuse settings and valid
+  saved sessions. Reload the dashboard to load the versioned frontend assets.
+  If you use a desktop login helper, download the matching v2.6.0 archive and
+  check it against `SHA256SUMS`.
+- Automated tests and local browser checks cover these changes. Live Twitch
+  sign-in, session renewal, and reward progress were outside this validation.
+
 # Release Notes - v2.5.0
 
 This minor release adds temporary queue ordering, reward artwork and live queue

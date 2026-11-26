@@ -87,6 +87,9 @@ class SessionTransport:
         self.diagnostics = diagnostics
         self._http: aiohttp.ClientSession | None = None
 
+    def proxy_url(self) -> str | None:
+        return self.proxy() if callable(self.proxy) else self.proxy
+
     async def request(self, method: str, url: str, *, headers: dict[str, str], body: Any = None) -> Any:
         if (method, url) not in {
             ("GET", BrowserSession.VALIDATE_URL), ("POST", BrowserSession.GQL_URL),
@@ -98,7 +101,7 @@ class SessionTransport:
             )
         try:
             async with self._http.request(
-                method, url, headers=headers, json=body, proxy=self.proxy() if callable(self.proxy) else self.proxy, allow_redirects=False,
+                method, url, headers=headers, json=body, proxy=self.proxy_url(), allow_redirects=False,
             ) as response:
                 if response.status != 200 and self.diagnostics is not None:
                     self.diagnostics.record_http(method, url, response.status, operations=body)
@@ -490,7 +493,7 @@ class ImportedSession:
         if self._stopping:
             raise ExitRequest()
 
-    async def gql(self, operations: Any) -> Any:
+    async def gql(self, operations: Any, *, single_attempt: bool = False) -> Any:
         if self._login is None:
             raise SessionError("AUTH")
         batch = isinstance(operations, list)
@@ -518,7 +521,7 @@ class ImportedSession:
                     if self._stopping:
                         raise ExitRequest() from None
                     candidates = body if batch else [body]
-                    if retries >= len(self._RETRY_DELAYS) or not all(self._safe_read(op) for op in candidates):
+                    if single_attempt or retries >= len(self._RETRY_DELAYS) or not all(self._safe_read(op) for op in candidates):
                         raise
                     delay = self._RETRY_DELAYS[retries]
                     retries += 1
@@ -527,6 +530,8 @@ class ImportedSession:
                     if error.code != "AUTH":
                         raise
                     self._rejected = True
+                    if single_attempt:
+                        raise
                     continue
                 else:
                     rows = response if batch else [response]
@@ -541,6 +546,8 @@ class ImportedSession:
                             results[index] = row
                     if rejected:
                         self._rejected = True
+                        if single_attempt:
+                            raise SessionError("AUTH")
                     pending = rejected
             if delay is not None:
                 # Renewal/admission changes and stop must not wait behind this delay.
